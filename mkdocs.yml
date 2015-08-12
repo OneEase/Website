@@ -18,9 +18,29 @@ theme:
     - toc.follow
     - navigation.top
     - content.code.copy
+    - search.highlight
+    - search.suggest
 plugins:
   - blog
+  - search
+      separator: '[\s\u200b\-_,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
   - git-revision-date-localized:
       enable_creation_date: true
-
+extra:
+  status:
+    new: Recently added
+    deprecated: Deprecated
+  footer:
+    copyright: "Copyright &copy; 2014 - 2020 OneEase Inc."
+# Page tree
+nav:
+  - Home: index.md
+  - EaseLock:
+    - About: easelock/index.md
+  - EaseHome:
+    - About: easehome/index.md
+  - Download:
+    - 00io: download/index.md
+  - Blog:
+    - blog/index.md
 
