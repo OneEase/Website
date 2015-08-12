@@ -1,0 +1,26 @@
+site_name: OneEase
+site_url: http://oneease.com
+site_author: OneEase Inc.
+site_description: >-
+  OneEase - Open Source Tutorials and Projects for Smart Home
+
+copyright: Copyright &copy; 2014 - 2020 OneEase Inc.
+theme:
+  name: material
+  features:
+    - navigation.footer
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.tabs
+    - navigation.expand
+    - navigation.path
+    - toc.integrate
+    - toc.follow
+    - navigation.top
+    - content.code.copy
+plugins:
+  - blog
+  - git-revision-date-localized:
+      enable_creation_date: true
+
+
