@@ -8,6 +8,7 @@ copyright: Copyright &copy; 2014 - 2020 OneEase Inc.
 theme:
   name: material
   features:
+    - announce.dismiss
     - navigation.footer
     - navigation.instant
     - navigation.instant.prefetch
@@ -22,7 +23,7 @@ theme:
     - search.suggest
 plugins:
   - blog
-  - search
+  - search:
       separator: '[\s\u200b\-_,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
   - git-revision-date-localized:
       enable_creation_date: true
@@ -36,7 +37,9 @@ extra:
 nav:
   - Home: index.md
   - EaseLock:
-    - About: easelock/index.md
+    - Hardware Tutorial: easelock/index.md
+    - Software Tutorial: easelock/app.md
+    - FQA: easelock/fqa.md
   - EaseHome:
     - About: easehome/index.md
   - Download:

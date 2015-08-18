@@ -1,4 +1,4 @@
-# EaseLock 
+# EaseLock Hardware Tutorual
 
 Create a custom smart lock device for your existing door that integrates an Atmega328 microcontroller,
 HC-05 Bluetooth module, and relay module, enabling remote operation from any paired Android device.
