@@ -37,7 +37,8 @@ extra:
 nav:
   - Home: index.md
   - EaseLock:
-    - Hardware Tutorial: easelock/index.md
+    - Home: easelock/index.md
+    - Hardware Tutorial: easelock/hw.md
     - Software Tutorial: easelock/app.md
     - FQA: easelock/fqa.md
   - EaseHome:
