@@ -1,12 +1,15 @@
 site_name: OneEase
-site_url: http://oneease.com
-site_author: OneEase Inc.
+site_url: https://oneease.com
+site_author:  Ethan Thompson in OneEase Inc. 
 site_description: >-
   OneEase - Open Source Tutorials and Projects for Smart Home
 
 copyright: Copyright &copy; 2014 - 2020 OneEase Inc.
 theme:
   name: material
+  custom_dir: overrides
+  logo: static/logo.png
+  favicon: static/favicon.ico
   features:
     - announce.dismiss
     - navigation.footer
@@ -31,8 +34,7 @@ extra:
   status:
     new: Recently added
     deprecated: Deprecated
-  footer:
-    copyright: "Copyright &copy; 2014 - 2020 OneEase Inc."
+
 # Page tree
 nav:
   - Home: index.md

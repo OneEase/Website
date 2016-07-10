@@ -3,7 +3,7 @@
 ## Note Before Reading The Tutorial
 
 This tutorial shows the softeware part of EaseLock. I assume you have finished seting up the
-hardware part of EaseLock during my last tutorial in [Hardware Tutorial](/easelock/), as to ensure
+hardware part of EaseLock during my last tutorial in [Hardware Tutorial](/easelock/hw), as to ensure
 we are in the same context even though the design article has been devided.
 
 The tutorial has been revised several times to improve the quality of EaseLock design.
