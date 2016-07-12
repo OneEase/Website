@@ -40,9 +40,9 @@ nav:
   - Home: index.md
   - EaseLock:
     - Home: easelock/index.md
-    - Hardware Tutorial: easelock/hw.md
-    - Software Tutorial: easelock/app.md
-    - FQA: easelock/fqa.md
+    - EaseLock Hardware Tutorial: easelock/hw.md
+    - EaseLock Software Tutorial: easelock/app.md
+    - Frequently Asked Questions: easelock/fqa.md
   - EaseHome:
     - About: easehome/index.md
   - Download:

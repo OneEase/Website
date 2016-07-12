@@ -532,9 +532,6 @@ To implement packet fragmentation and reassembly, we need to design a packet hea
 
 ```
 public class Message {
-	public short pktNO;
-	public byte seqNO;
-	public short checksum;
     public byte msgType;
     public short msgSize;
     public byte[] payload;
@@ -550,20 +547,6 @@ public class Message {
     public static final byte MSG_TYPE_DOOR_COMMAND = 0x03;
     public static final byte MSG_TYPE_CHALLENGE_RESPONSE = 0x04;
     public static final byte MSG_TYPE_SYNC_TIMESTAMP = 0x05;
-
-    public byte[] pack() {
-        byte[] messageBytes = new byte[8 + msgSize];
-        messageBytes[0] = pktNO;
-        messageBytes[1] = (byte) (seqNO >> 8);
-        messageBytes[2] = (byte) (seqNO & 0xFF);
-		messageBytes[3] = (byte) (checksum >> 8);
-        messageBytes[4] = (byte) (checksum & 0xFF);
-        messageBytes[5] = msgType;
-        messageBytes[6] = (byte) (msgSize >> 8);
-        messageBytes[7] = (byte) (msgSize & 0xFF);
-        System.arraycopy(payload, 0, messageBytes, 8, payload.length);
-        return messageBytes;
-    }
 
     public static Message createAuthMessage(byte[] payload) {
         return new Message(MSG_TYPE_AUTH, (short) payload.length, payload);
@@ -608,6 +591,61 @@ When sending a large data buffer, we divide it into smaller packets using the fo
 * Construct the packet header using the PN, SN, MT,MS and CK fields.
 * Transmit each packet over Bluetooth.
 
+
+Here's an updated code snippet of ```class Message``` in the Android app to support packet fragmentation:
+
+
+```
+public static short globalPktNO = 0;
+
+public static synchronized short generatePacketNumber() {
+    return ++globalPktNO;
+}
+
+public static byte[][] fragmentPacket(Message msg, int mtuSize) {
+	if (mtuSize <= 8) {
+        throw new IllegalArgumentException("MTU size must be greater than 8");
+    }
+
+	short pktID = Message.generatePacketNumber();
+    int numPackets = (int) Math.ceil((double) msg.payload.length / (mtuSize - 8));
+    byte[][] packets = new byte[numPackets][];
+
+    for (int i = 0; i < numPackets; i++) {
+        int packetSize = Math.min(mtuSize - 8, msg.payload.length - i * (mtuSize - 8));
+        byte[] packet = new byte[mtuSize];
+
+		// set Packet Number
+        packet[0] = (byte) (pktID >> 8); // pktNO
+        packet[1] = (byte) (pktID & 0xFF); // pktNO
+
+		// set Sequence Number
+		packet[2] = (byte) ((i == 0) ? 0x80 : 0x00); // seqNO MSB
+		packet[2] = (byte) (packet[2] | (packetSize - i)); // seqNO
+
+        // set Checksum
+		short chksum = crc16(msg.payload, packetSize);
+        packet[3] = (byte) (chksum >> 8); // checksum high byte
+        packet[4] = (byte) (chksum & 0xFF); // checksum low byte
+
+		// set Message Type
+        packet[5] = (byte) msg.msgType; // msgType
+
+		// set Message Size
+		short msize = (i == 0) ? msg.payload.length : packetSize;
+        packet[6] = (byte) ((msize >> 8) & 0xFF); // message size high byte
+        packet[7] = (byte) (msize & 0xFF); // message size low byte
+
+        System.arraycopy(msg.payload, i * (mtuSize - 8), packet, 8, packetSize);
+        packets[i] = packet;
+    }
+    return packets;
+}
+
+
+
+```
+
 ### Packet Reassembly
 
 At the receiving end, we reassemble the packets using the following algorithm:
@@ -619,38 +657,58 @@ At the receiving end, we reassemble the packets using the following algorithm:
 * Reassemble the packets in the correct order using the Packet Number (PN) and Sequence Number (SN) fields.
 * Verify the reassembled packet using the Checksum (CK) field.
 
+
+Here's an updated code snippet of ```class Message``` in the Android app to support packet reassembly:
+
+```
+public static Message assemblePacket(byte[][] packets, int mtuSize) {
+    if (packets == null || packets.length == 0) {
+        throw new IllegalArgumentException("No packets to assemble");
+    }
+
+    // Extract the packet number, sequence number, total message size and message type from the first packet
+    short pktNO = (short) (((packets[0][0] & 0xFF) << 8) | (packets[0][1] & 0xFF));
+    byte seqNO = packets[0][2];
+    byte msgType = packets[0][5];
+	short totalSize = (short) (((packets[0][6] & 0xFF) << 8) | (packets[0][7] & 0xFF));
+
+    // Create a new byte array to store the reassembled payload
+    byte[] payload = new byte[totalSize];
+
+    // Reassemble the payload
+    int offset = 0;
+    for (byte[] packet : packets) {
+        int packetSize = packet.length - 8;
+		if (offset == 0) {
+			packetSize = mtuSize - 8;
+		}
+        System.arraycopy(packet, 8, payload, offset, packetSize);
+        offset += packetSize;
+    }
+
+    // Verify the checksum
+    short chksum = crc16(payload, totalSize);
+    if (chksum!= ((short) (((packets[0][3] & 0xFF) << 8) | (packets[0][4] & 0xFF)))) {
+        throw new IOException("Checksum mismatch");
+    }
+
+    // Create a new Message object with the reassembled payload
+    Message msg = new Message(msgType, (short) totalSize, payload);
+    return msg;
+}
+```
+
+
 ### Packet Transmission Example
 
 Here is an example of packet fragmentation and reassembly for a 120-byte data payload with an MTU size of 32 bytes:
 
-#### Packet 1
-
 | Packet Number (PN) | Sequence Number (SN)	| Checksum (CK)	| Message Type (MT)	| Message Size (MS)	 | Payload |
 |----------|----------|----------|----------|----------|----------|
 | 0x0001(Unique packet number)| 0x85(First packet, MSB set to 1, rest bits set to 0x5)	| Calculated CRC-16 checksum | 0x01(Authentication Message) | 0x0078(whole 120 bytes payload)	| First 24 bytes of data |
-
-#### Packet 2
-
-| Packet Number (PN) | Sequence Number (SN)	| Checksum (CK)	| Message Type (MT)	| Message Size (MS)	 | Payload |
-|----------|----------|----------|----------|----------|----------|
 | 0x0001(Unique packet number)| 0x04(Second packet, MSB set to 0)	| Calculated CRC-16 checksum | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| Next 24 bytes of data |
-
-#### Packet 3
-
-| Packet Number (PN) | Sequence Number (SN)	| Checksum (CK)	| Message Type (MT)	| Message Size (MS)	 | Payload |
-|----------|----------|----------|----------|----------|----------|
 | 0x0001(Unique packet number)| 0x03(Third packet, MSB set to 0)	| Calculated CRC-16 checksum | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| Next 24 bytes of data |
-
-#### Packet 4
-
-| Packet Number (PN) | Sequence Number (SN)	| Checksum (CK)	| Message Type (MT)	| Message Size (MS)	 | Payload |
-|----------|----------|----------|----------|----------|----------|
 | 0x0001(Unique packet number)| 0x02(Fourth packet, MSB set to 0)	| Calculated CRC-16 checksum | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| Next 24 bytes of data |
-
-#### Packet 5
-
-| Packet Number (PN) | Sequence Number (SN)	| Checksum (CK)	| Message Type (MT)	| Message Size (MS)	 | Payload |
-|----------|----------|----------|----------|----------|----------|
 | 0x0001(Unique packet number)| 0x01(Last packet, MSB set to 0)	| Calculated CRC-16 checksum | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| Last 24 bytes of data |
 
 In this example, the 120-byte data payload is divided into 5 packets, each with a maximum size of 32 bytes (MTU size). The Packet Number (PN) field is set to a unique value, and the Sequence Number (SN) field is used to determine the correct order of the packets. The Checksum (CK) field is calculated using a checksum algorithm (e.g., CRC-16) to detect errors during transmission.
@@ -661,8 +719,6 @@ At the receiving end, the packets are reassembled using the PN and SN fields, an
 
 How about a short packet? Below is an example for sending 24-byte data payload with an MTU size of 32 bytes:
 
-#### Packet 1
-
 | Packet Number (PN) | Sequence Number (SN)	| Checksum (CK)	| Message Type (MT)	| Message Size (MS)	 | Payload |
 |----------|----------|----------|----------|----------|----------|
 | 0x0002(Unique packet number)| 0x81(First packet, MSB set to 1, rest bits set to 0x1)	| Calculated CRC-16 checksum | 0x03(Door Command) | 0x0018(whole 24 bytes payload)	| whole 24 bytes of data |
@@ -670,6 +726,8 @@ How about a short packet? Below is an example for sending 24-byte data payload w
 
 
 ### The Checksum Implementation
+
+Here's the code snippet of ```crc16``` in C to support checksum: 
 
 ```
 uint16_t crc16(uint8_t *data, uint16_t len) {
@@ -720,21 +778,22 @@ const uint16_t crc16_table[256] = {
 
 ### Error Detection and Correction
 
-To detect and correct errors, we implement the following mechanisms:
+To ensure reliable transmission of packets, we need to detect packet loss and retransmit the packets. We will use a timeout-based and ACK approach to detect packet loss. If the transmitting end does not receive an ACK packet within a certain time period (e.g., 100ms), it assumes the packet is lost and retransmits the packet.
 
 #### Packet Acknowledgment
 
-The receiving end sends an acknowledgment packet (ACK) for each packet received correctly. The ACK packet includes the Packet Number (PN),Sequence Number (SN) and a status field indicating whether the packet was received correctly.
+The receiving end sends an acknowledgment packet (ACK) for each packet received. The ACK packet includes the Packet Number (PN),Sequence Number (SN) and a status field indicating whether the packet was received correctly. The error ACK is sent if receiving end receives incorrect packet (e.g., checksum fails, wrong SN).
 
 Here's an updated code snippet in the Android app to support ACK:
 
 ```
 public static final byte MSG_TYPE_ACK = 0x06;
-public static Message createAckMessage(byte packetNumber, byte sequenceNumber, boolean status) {
+public static Message createAckMessage(short packetNumber, byte sequenceNumber, boolean status) {
     byte[] payload = new byte[3];
-    payload[0] = packetNumber;
-    payload[1] = sequenceNumber;
-    payload[2] = (byte) (status ? 1 : 0);
+    payload[0] = (byte) (packetNumber >> 8);
+    payload[1] = (byte) (packetNumber & 0xFF);
+    payload[2] = sequenceNumber;
+    payload[3] = (byte) (status ? 1 : 0);
     return new Message(MSG_TYPE_ACK, (short) payload.length, payload);
 }
 ```
@@ -742,13 +801,260 @@ public static Message createAckMessage(byte packetNumber, byte sequenceNumber, b
 
 #### Packet Retransmission
 
-If the transmitting end does not receive an ACK packet within a certain time period (e.g., 100ms), it assumes the packet is lost and retransmits the packet using the same Packet Number (PN) and Sequence Number (SN) fields.
+If the transmitting end does not receive an ACK packet within a certain time period (e.g., 100ms), it assumes the packet is lost and retransmits the packet using the same Packet Number (PN) and Sequence Number (SN) fields. Specifically, the packet loss detection works in the following way:
+
+* The transmitting end maintains a timer for each packet sent.
+* When a packet is sent, the timer is started with a timeout value (e.g., 100ms).
+* If the transmitting end receives an ACK packet for the sent packet before the timer expires, the timer is cancelled.
+* If an ACK packet of wrong status code is received, the transmitting end will restart the message transmission.
+* If the timer expires, the packet is considered lost, and the transmitting end will start retransmitting the packet.
+* If the retransmission counter exceeds a maximum value (e.g., 3), the transmitting end gives up retransmitting the message and reports an error.
+
+Here's an updated code snippet in the Android app to support packet retransmission:
+
+```
+public class MessageTransmitter {
+    // Timeout value for packet retransmission (100ms)
+    private static final int TIMEOUT_VALUE = 100; 
+    // Maximum number of retransmissions (3)
+    private static final int MAX_RETRANSMISSIONS = 3;
+
+    // Map to store packets with their sequence numbers
+    private Map<Integer, byte[]> messageMap;
+    // Next sequence number to be sent
+    private int nextSequenceNumber;
+    // Current message being transmitted
+    private Message msg;
+    // Fragmented packets of the current message
+    private byte[][] msgPackets;
+
+    // Input and output streams for Bluetooth communication
+    private InputStream mmIn;
+    private OutputStream mmOut;
+
+    // Timer for packet retransmission
+    private Timer timer;
+
+    public MessageTransmitter(InputStream in, OutputStream out) {
+        messageMap = new HashMap<>();
+        nextSequenceNumber = 0;
+        mmIn = in;
+        mmOut = out;
+    }
+
+    /**
+     * Send a message over Bluetooth
+     * @param message the message to be sent
+     */
+    public void sendMessage(Message message) {
+        msg = message;
+        // Fragment the message into packets
+        msgPackets = Message.fragmentPacket(message, 32); // 32 is the MTU size
+        for (byte[] packet : msgPackets) {
+            int sequenceNumber = packet[2] & 0x7F;
+            messageMap.put(sequenceNumber, packet);
+        }
+        int seq = msgPackets[0][2] & 0x7F;
+        nextSequenceNumber = seq - 1;
+
+        // Send the first packet
+        sendPacket(seq, msgPackets[0]);
+    }
+
+    /**
+     * Send a packet over Bluetooth
+     * @param sequenceNumber the sequence number of the packet
+     * @param packet the packet to be sent
+     */
+    private void sendPacket(int sequenceNumber, byte[] packet) {
+        // Send the packet over Bluetooth
+        mmOut.write(packet);
+        // Start a timer for packet retransmission
+        startTimer(sequenceNumber, TIMEOUT_VALUE);
+    }
+
+    /**
+     * Start a timer for packet retransmission
+     * @param sequenceNumber the sequence number of the packet
+     * @param timeoutValue the timeout value for retransmission
+     */
+    private void startTimer(int sequenceNumber, int timeoutValue) {
+        timer = new Timer();
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                handlePacketLoss(sequenceNumber);
+            }
+        }, timeoutValue);
+    }
+
+    /**
+     * Handle packet loss by retransmitting the packet
+     * @param sequenceNumber the sequence number of the packet
+     */
+    private void handlePacketLoss(int sequenceNumber) {
+        byte[] packet = messageMap.get(sequenceNumber);
+        if (packet!= null) {
+            // Retransmit the packet
+            sendPacket(sequenceNumber, packet);
+        } else {
+            // Unknown error
+        }
+    }
+
+    /**
+     * Resend the entire message
+     */
+    private void resendMessage() {
+        int retransmissionCount = msg.getRetransmissionCount();
+        if (retransmissionCount < MAX_RETRANSMISSIONS) {
+            msg.setRetransmissionCount(retransmissionCount + 1);
+            // Resend all packets
+            int seq = msgPackets[0][2] & 0x7F;
+            nextSequenceNumber = seq - 1;
+            sendPacket(seq, msgPackets[0]);
+        } else {
+            // Report error: packet lost after max retransmissions
+            return;
+        }
+    }
+
+    /**
+     * Receive an ACK packet and handle it accordingly
+     * @param sequenceNumber the sequence number of the packet
+     * @param status the status of the packet (1 = acknowledged, 0 = error)
+     */
+    public void receiveAckPacket(int sequenceNumber, int status) {
+        byte[] packet = messageMap.get(sequenceNumber);
+        if (packet!= null) {
+            if (status == 1) {
+                // Packet acknowledged, send next packet
+                timer.cancel(); // cancel the timer
+                int next = nextSequenceNumber;
+                if (next == 1) {
+                    // All packets are sent
+                    return;
+                }
+                nextSequenceNumber--;
+                sendPacket(next, messageMap.get(next));
+            } else {
+                // Error occurred, resend all packets
+                resendMessage();
+            }
+        }
+    }
+}
+
+```
 
 By using this design, we can efficiently fragment and reassemble large data buffers over Bluetooth, while ensuring reliable and error-free transmission.
 
 
 ## Get Notified When Door Is Open Or Closed
 
+As we've implemented the door control system, we've noticed that there's a lack of feedback when sending commands to the device. Every time we click the open or close button, we're left wondering whether the command was executed successfully or not. Sometimes, the door opens or closes as expected, but other times, it doesn't respond at all. And occasionally, strange things happen, leaving us with an incorrect door status.
+
+This lack of feedback is not only frustrating but also leads to uncertainty and potential errors. To address this issue, we need to implement a notification mechanism that allows the receiver to notify the sender of the command execution status.
+
+To meet these requirements, we can introduce a new message type, ```MSG_TYPE_NOTIFY```, which can be used for all 
+types of notifications between the device and the app. The message payload for ```MSG_TYPE_NOTIFY``` can consist of the following fields:
+
+* Packet Number (PN): a short integer indicating the corresponding packet number of for notification.
+* Message Type (MT): a byte indicating the type of command that triggered the notification (e.g., auth, change password, command, challenge response, etc.)
+* Result (Ret): a short integer indicating the result of the command (e.g., 0 for success, 1 for failure, etc.)
+* Description (Desc): a string describing the result of the command (e.g., "Authentication successful", "Password changed successfully", "Door opened successfully", etc.)
+
+By using MSG_TYPE_NOTIFY as a unified notification message type, we can provide a consistent way of notifying between Android app and the door of message execution status for all types of commands.
+
+Here's an updated code snippet in the Android app to support NOTIFY:
+
+```
+public static final byte MSG_TYPE_NOTIFY = 0x07;
+public static Message createNotifyMessage(short packetNumber, byte messageType, short result, byte[] desc) {
+    byte[] payload = new byte[5 + desc.length];
+    payload[0] = (byte) (packetNumber >> 8);
+    payload[1] = (byte) (packetNumber & 0xFF);
+    payload[2] = messageType;
+	payload[3] = (byte) (result >> 8);
+    payload[4] = (byte) (result & 0xFF);
+	if (desc.length > 0) {
+		System.arraycopy(desc, 0, payload, 5, desc.length);
+	}
+    return new Message(MSG_TYPE_NOTIFY, (short) payload.length, payload);
+}
+```
+
 ## Put It All Together
 
-It Works Perfectly
+Wow, we've come a long way since we started this project! From a simple Bluetooth transmission command to a full-fledged door control system with authentication, password change, and status update notification features. It's amazing how much complexity can be added to a system when you try to make it more secure and user-friendly.
+
+As I look back on our journey, I realize that we've been focusing on individual components of the system, like authentication and password change. But now, it's time to put all the pieces together and see how they work in harmony.
+
+### Sequence Diagram
+
+To help us visualize the entire interaction process, let's create a sequence diagram that shows how the Android app and door control system communicate with each other. Here's what it might look like:
+
+```
+ Android App                         Door Control System
+      |                                      |
+      |  Connected via Bluetooth 		  	 |
+      |<------------------------------------>|
+      |                                      |
+      |  Each side set a fix MTU 			 |
+      |<------------------------------------>|
+      |                                      |
+      |  Send auth request                   |
+      |------------------------------------->|
+      |                                      |
+      |  Send timestamp sync request 		 |
+      |<-------------------------------------|
+      |                                      |
+      |  Send timestamp response             |
+      |------------------------------------->|
+      |                                      |
+      |  Receive timestamp sync result       |
+      |<-------------------------------------|
+      |                                      |
+      |  Send auth request                   |
+      |------------------------------------->|
+      |                                      |
+      |  Receive auth challenge              |
+      |<-------------------------------------|
+      |                                      |
+      |  Send auth response                  |
+      |------------------------------------->|
+      |                                      |
+      |  Receive auth result                 |
+      |<------------------------------------ |
+      |                                      |
+      |  Send change password request        |
+      |------------------------------------->|
+      |                                      |
+      |  Receive change password result      |
+      |<-------------------------------------|
+      |                                      |
+      |  Send door control command           |
+      |------------------------------------->|
+      |                                      |
+      |  Receive door control notify result  |
+      |<-------------------------------------|
+      |                                      |
+      |  Receive door status update  		 |
+      |<-------------------------------------|
+      |                                      |
+      |  Display door status update  		 |
+      |                                      |
+
+```
+As I look at this sequence diagram, I'm struck by how many different interactions are involved in the door control process. From authentication to password change to door control, there are so many different messages being sent back and forth between the Android app and door control system. Note that even a one way interaction in the sequence diagram may contains multiple round-chip data transfer because of the message fragmentation and message notify.
+
+But despite the complexity, I'm proud of what we've accomplished. We've created a system that's not only functional but also secure and user-friendly. And with the sequence diagram, we can see exactly how all the different components fit together to create a seamless user experience.
+
+###  Next Steps
+
+So what's next? Well, now that we have a complete system including hardware and software, it's time to test it out and see how it works in practice. 
+You could download the whole project source code and test if yourself. Keep in mind that the UI is urgly as I am not ready to spend time on it.
+
+And then, of course, there's the possibility of adding even more features to the system. Maybe we could add support for multiple doors or integrate with other smart home devices. The possibilities are endless, and I'm excited to see where this project will take us in the future.
+
+
