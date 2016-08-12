@@ -2,7 +2,7 @@
 
 ## All Tutorial Downloads
 
-Here are the source code built for EaseHome, click to download it directly.
+Here are the source code projects built for EaseHome, click to download it directly.
 
 * [Microsoft Bot Connector Proxy](/download/easehome/EaseHome.Adapter.zip)
 * [Luis Project File](/download/easehome/EaseHome.Luis.zip)
