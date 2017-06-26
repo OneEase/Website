@@ -1,12 +1,8 @@
 # EaseLock Software Tutorial
 
-## Note Before Reading The Tutorial
-
 This tutorial shows the softeware part of EaseLock. I assume you have finished seting up the
 hardware part of EaseLock during my last tutorial in [Hardware Tutorial](/easelock/hw), as to ensure
 we are in the same context even though the design article has been devided.
-
-The tutorial has been revised several times to improve the quality of EaseLock design.
 
 ## Conduct A Meticulous Analysis of The Code
 
@@ -385,10 +381,10 @@ Firstly, the Android App sends a ```MSG_TYPE_AUTH``` message to the device and
 nn the board side, we can generate a random challenge and send it to the Android app.
 Further, the Android App sends a ```MSG_TYPE_CHALLENGE_RESPONSE``` message to the device to verify.
 
-On the board side, we can generate a random challenge using current timestamp and send it to the Android app.
+On the board side, we can generate a random challenge using current timestamp together with a secret string, send it to the Android app.
 
 ```
-byte storedChallenge[4];// 4-byte challenge
+byte storedChallenge[16];// 16-byte challenge
 
 void sendChallenge() {
     unsigned long timestamp = millis(); // get the current timestamp
@@ -397,13 +393,69 @@ void sendChallenge() {
     storedChallenge[2] = (byte) (timestamp >> 8);
     storedChallenge[3] = (byte) timestamp;
 
+    // Fill the remaining bytes with a secret string "ethan'slock"
+    const char* fixedString = "ethan'slock";
+    memcpy(&storedChallenge[4], fixedString, 12);
+
     Message challengeMessage;
-    challengeMessage.type = MSG_TYPE_AUTH;
-    challengeMessage.length = 4;
-    memcpy(challengeMessage.payload, storedChallenge, 4);
+    challengeMessage.type = MSG_TYPE_CHALLENGE_RESPONSE;
+    challengeMessage.length = 16;
+    memcpy(challengeMessage.payload, storedChallenge, 16);
     sendMessage(&challengeMessage);
 }
 ```
+
+When working in the constrained environment of the board where external libraries are not permitted, a
+straightforward approach to implement the challenge response verfication function is to to hash a password and a challenge using a basic XOR
+operation. Although this method does not provide the cryptographic security of standard algorithms
+like SHA-256, it serves well in scenarios where simplicity is paramount.
+
+The function combines the challenge and password by performing a byte-wise XOR operation. This approach ensures that the resultant hash is a unique representation of both inputs.
+
+```
+#define CHALLENGE_SIZE 16
+#define PASSWORD_SIZE 16
+#define RESPONSE_SIZE 16
+
+// Function to hash password with challenge using XOR operation
+void hashPassword(const unsigned char *challenge, const unsigned char *password, unsigned char *hashed) {
+    for (int i = 0; i < CHALLENGE_SIZE; i++) {
+        hashed[i] = challenge[i] ^ password[i];
+    }
+}
+
+// Function to verify the challenge-response
+int verifyChallengeResponseMessage(Message message) {
+    if (message.length < 32) {
+        // Payload is too short to be valid
+        return 0;
+    }
+
+    byte challenge[CHALLENGE_SIZE]; // 16-byte challenge
+    byte clientResponse[RESPONSE_SIZE]; // 16-byte password hash
+    unsigned char expectedResponse[RESPONSE_SIZE];
+
+    // Extract the challenge and response from the message payload
+    memcpy(challenge, message.payload, CHALLENGE_SIZE);
+    memcpy(clientResponse, message.payload + CHALLENGE_SIZE, RESPONSE_SIZE);
+
+    // Hash the stored challenge and password
+    hashPassword(storedChallenge, storedPassword, expectedResponse);
+
+    // Verify the challenge and response
+    if (memcmp(challenge, storedChallenge, CHALLENGE_SIZE) == 0 &&
+        memcmp(clientResponse, expectedResponse, CHALLENGE_SIZE) == 0) {
+        // Authentication successful
+        return 1;
+    } else {
+        // Authentication failed
+        return 0;
+    }
+}
+
+```
+
+
 On the app side, we can receive the challenge information and generate a response message based on the challenge.
 
 ```
@@ -413,22 +465,6 @@ public static Message createChallengeResponseMessage(byte[] challenge, byte[] pa
     System.arraycopy(challenge, 0, payload, 0, challenge.length);
     System.arraycopy(passwordHash, 0, payload, challenge.length, passwordHash.length);
     return new Message(MSG_TYPE_CHALLENGE_RESPONSE, (short) payload.length, payload);
-}
-```
-On the device side, the challenge information will be verified as follows:
-
-```
-void verifyChallengeResponseMessage(Message message) {
-    byte challenge[4]; // 16-byte challenge
-    byte passwordHash[16]; // 16-byte password hash
-    memcpy(challenge, message.payload, 4);
-    memcpy(passwordHash, message.payload + 4, 16);
-    // verify the challenge and hash
-    if (memcmp(challenge, storedChallenge, 4) == 0 && memcmp(passwordHash, storedPasswordHash, 16) == 0) {
-        // authentication successful
-    } else {
-        // authentication failed
-    }
 }
 ```
 
@@ -526,7 +562,7 @@ To implement packet fragmentation and reassembly, we need to design a packet hea
 | Sequence Number (SN) | 1| Sequence number for packet ordering. The most significant bit(MSB) is set to 1 for first packet,otherwise MSB is 0. The 7 least significant bits (LSB) are used to store the packet sequence number in decreasing order| new |
 | Checksum (CK) | 2	| checksum for error detection. CRC-16 is used for checksum and all bytes except CK itself are calculated| new |
 | Message Type (MT) | 1| identify the message type| |
-| Message Size (MS) | 2| Length of the packet fragment payload (or total length for first packet) | |
+| Message Size (MS) | 2| Length of the packet fragment payload (or total length for first packet to help checksum verfication) | |
 | Payload | variable | Packet payload data | |
 
 
@@ -587,7 +623,8 @@ When sending a large data buffer, we divide it into smaller packets using the fo
 * Assign a unique Packet Number (PN) to each packet in incremental order.
 * For the first packet, set the MSB of Sequence Number (SN) to 1 and the rest of 7 LSB to MPS, set the Packet Length (PL) to the total length of all packets.
 * For subsequent packets, set the MSB of Sequence Number (SN) to 0 and the rest of 7 LSB to a decreasing value starting from MPS minus 1 (e.g., 0x1F, 0x1E, ..., 0x1) and the Packet Length (PL) to the length of the packet payload.
-* Calculate the Checksum (CK) for each packet using a checksum algorithm CRC-16.
+* For the first packet, calculate the Checksum (CK) for all packets using a checksum algorithm CRC-16.
+* For subsequent packets, calculate the Checksum (CK) for each packet using a checksum algorithm CRC-16.
 * Construct the packet header using the PN, SN, MT,MS and CK fields.
 * Transmit each packet over Bluetooth.
 
@@ -988,7 +1025,7 @@ public static Message createNotifyMessage(short packetNumber, byte messageType, 
 
 Wow, we've come a long way since we started this project! From a simple Bluetooth transmission command to a full-fledged door control system with authentication, password change, and status update notification features. It's amazing how much complexity can be added to a system when you try to make it more secure and user-friendly.
 
-As I look back on our journey, I realize that we've been focusing on individual components of the system, like authentication and password change. But now, it's time to put all the pieces together and see how they work in harmony.
+Now, it's time to put all the pieces together and see how they work in harmony.
 
 ### Sequence Diagram
 
@@ -1000,7 +1037,7 @@ To help us visualize the entire interaction process, let's create a sequence dia
       |  Connected via Bluetooth 		  	 |
       |<------------------------------------>|
       |                                      |
-      |  Each side set a fix MTU 			 |
+      |  Each side set a fix and small MTU   |
       |<------------------------------------>|
       |                                      |
       |  Send auth request                   |
@@ -1048,9 +1085,609 @@ To help us visualize the entire interaction process, let's create a sequence dia
 ```
 As I look at this sequence diagram, I'm struck by how many different interactions are involved in the door control process. From authentication to password change to door control, there are so many different messages being sent back and forth between the Android app and door control system. Note that even a one way interaction in the sequence diagram may contains multiple round-chip data transfer because of the message fragmentation and message notify.
 
-But despite the complexity, I'm proud of what we've accomplished. We've created a system that's not only functional but also secure and user-friendly. And with the sequence diagram, we can see exactly how all the different components fit together to create a seamless user experience.
+To simplify the implementation, I design four class in app to make it clear: Message design, MessageTransmitter design, MessageReceiver design and MessageController design.
+
+### The ```Message``` 
+
+The ```Message``` class is designed to encapsulate the communication protocol used for message passing between components.
+
+```
+public class Message {
+    public byte msgType;
+    public short msgSize;
+    public byte[] payload;
+
+    public Message(byte msgType, short msgSize, byte[] payload) {
+        this.msgType = msgType;
+        this.msgSize = msgSize;
+        this.payload = payload;
+    }
+
+    public static final byte MSG_TYPE_AUTH = 0x01;
+    public static final byte MSG_TYPE_CHANGE_PASSWORD = 0x02;
+    public static final byte MSG_TYPE_DOOR_COMMAND = 0x03;
+    public static final byte MSG_TYPE_CHALLENGE_RESPONSE = 0x04;
+    public static final byte MSG_TYPE_SYNC_TIMESTAMP = 0x05;
+	public static final byte MSG_TYPE_ACK = 0x06;
+	public static final byte MSG_TYPE_NOTIFY = 0x07;
+	
+    public static Message createAuthMessage(byte[] payload) {
+        return new Message(MSG_TYPE_AUTH, (short) payload.length, payload);
+    }
+
+    public static Message createChangePasswordMessage(byte[] payload) {
+        return new Message(MSG_TYPE_CHANGE_PASSWORD, (short) payload.length, payload);
+    }
+
+    public static Message createDoorCommandMessage(byte[] payload) {
+        return new Message(MSG_TYPE_DOOR_COMMAND, (short) payload.length, payload);
+    }
+
+    public static Message createChallengeResponseMessage(byte[] challenge, byte[] passwordHash) {
+        byte[] payload = new byte[challenge.length + passwordHash.length];
+        System.arraycopy(challenge, 0, payload, 0, challenge.length);
+        System.arraycopy(passwordHash, 0, payload, challenge.length, passwordHash.length);
+        return new Message(MSG_TYPE_CHALLENGE_RESPONSE, (short) payload.length, payload);
+    }
+
+    public static Message createSyncTimestampMessage(long timestamp) {
+        byte[] payload = new byte[4];
+        payload[0] = (byte) (timestamp >> 24);
+        payload[1] = (byte) (timestamp >> 16);
+        payload[2] = (byte) (timestamp >> 8);
+        payload[3] = (byte) timestamp;
+        return new Message(MSG_TYPE_SYNC_TIMESTAMP, (short) payload.length, payload);
+	}
+
+	public static Message createAckMessage(short packetNumber, byte sequenceNumber, boolean status) {
+		byte[] payload = new byte[4];
+		payload[0] = (byte) (packetNumber >> 8);
+		payload[1] = (byte) (packetNumber & 0xFF);
+		payload[2] = sequenceNumber;
+		payload[3] = (byte) (status ? 1 : 0);
+		return new Message(MSG_TYPE_ACK, (short) payload.length, payload);
+	}
+
+	public static Message createNotifyMessage(short packetNumber, byte messageType, short result, byte[] desc) {
+		byte[] payload = new byte[5 + desc.length];
+		payload[0] = (byte) (packetNumber >> 8);
+		payload[1] = (byte) (packetNumber & 0xFF);
+		payload[2] = messageType;
+		payload[3] = (byte) (result >> 8);
+		payload[4] = (byte) (result & 0xFF);
+		if (desc.length > 0) {
+			System.arraycopy(desc, 0, payload, 5, desc.length);
+		}
+		return new Message(MSG_TYPE_NOTIFY, (short) payload.length, payload);
+	}
+
+	private int retransmissionCount = 0;
+
+	public int getRetransmissionCount() {
+		return retransmissionCount;
+	}
+
+	public void setRetransmissionCount(int retransmissionCount) {
+		this.retransmissionCount = retransmissionCount;
+	}
+
+	public static short globalPktNO = 0;
+
+	public static synchronized short generatePacketNumber() {
+		return ++globalPktNO;
+	}
+
+	public static byte[][] fragmentPacket(Message msg, int mtuSize){
+		if (mtuSize <= 8) {
+            return null;
+		}
+
+		short pktID = Message.generatePacketNumber();
+		int numPackets = (int) Math.ceil((double) msg.payload.length / (mtuSize - 8));
+		byte[][] packets = new byte[numPackets][];
+
+		for (int i = 0; i < numPackets; i++) {
+			int packetSize = Math.min(mtuSize - 8, msg.payload.length - i * (mtuSize - 8));
+			byte[] packet = new byte[mtuSize];
+
+			// set Packet Number
+			packet[0] = (byte) (pktID >> 8); // pktNO
+			packet[1] = (byte) (pktID & 0xFF); // pktNO
+
+			// set Sequence Number
+			packet[2] = (byte) ((i == 0) ? 0x80 : 0x00); // seqNO MSB
+			packet[2] = (byte) (packet[2] | (packetSize - i)); // seqNO
+			
+			// set Message Type
+			packet[5] = (byte) msg.msgType; // msgType
+
+			// set Message Size
+			short msize = (short)((i == 0) ? msg.payload.length : packetSize);
+			packet[6] = (byte) ((msize >> 8) & 0xFF); // message size high byte
+			packet[7] = (byte) (msize & 0xFF); // message size low byte
+
+			System.arraycopy(msg.payload, i * (mtuSize - 8), packet, 8, packetSize);
+            // set Checksum
+			short chksum = crc16((i == 0)? msg.payload : packet);
+			packet[3] = (byte) (chksum >> 8); // checksum high byte
+			packet[4] = (byte) (chksum & 0xFF); // checksum low byte
+			packets[i] = packet;
+
+		}
+		return packets;
+	}
+	public static Message assemblePacket(byte[][] packets, int mtuSize) throws IOException{
+		if (packets == null || packets.length == 0) {
+			return null;
+		}
+
+		// Extract the packet number, sequence number, total message size and message type from the first packet
+		short pktNO = (short) (((packets[0][0] & 0xFF) << 8) | (packets[0][1] & 0xFF));
+		byte seqNO = packets[0][2];
+		byte msgType = packets[0][5];
+		short totalSize = (short) (((packets[0][6] & 0xFF) << 8) | (packets[0][7] & 0xFF));
+
+		// Create a new byte array to store the reassembled payload
+		byte[] payload = new byte[totalSize];
+
+		// Reassemble the payload
+		int offset = 0;
+		for (byte[] packet : packets) {
+			int packetSize = packet.length - 8;
+			if (offset == 0) {
+				packetSize = mtuSize - 8;
+			}
+			System.arraycopy(packet, 8, payload, offset, packetSize);
+			offset += packetSize;
+		}
+
+		// Verify the checksum
+		short chksum = crc16(payload);
+		if (chksum!= ((short) (((packets[0][3] & 0xFF) << 8) | (packets[0][4] & 0xFF)))) {
+			throw new IOException("Checksum mismatch");
+		}
+
+		// Create a new Message object with the reassembled payload
+		Message msg = new Message(msgType, (short) totalSize, payload);
+		return msg;
+	}
+
+    private static final int[] CRC16_TABLE = {
+        0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
+        0x8008, 0x9029, 0xA04A, 0xB06B, 0xC08C, 0xD0AD, 0xE0CE, 0xF0EF,
+        0x1081, 0x1082, 0x2083, 0x3084, 0x4085, 0x50A6, 0x60C7, 0x70E8,
+        0x8009, 0x902A, 0xA04B, 0xB06C, 0xC08D, 0xD0AE, 0xE0CF, 0xF0EF,
+        0x2102, 0x3213, 0x4324, 0x5435, 0x6546, 0x7657, 0x8768, 0x9879,
+        0xA09A, 0xB0AB, 0xC0AC, 0xD0AD, 0xE0AE, 0xF0AF,
+        0x3121, 0x4232, 0x5343, 0x6454, 0x7565, 0x8676, 0x9787, 0xA098,
+        0xB0A9, 0xC0AA, 0xD0AB, 0xE0AC, 0xF0AD,
+        0x4122, 0x5233, 0x6344, 0x7455, 0x8566, 0x9677, 0xA078, 0xB089,
+        0xC0A9, 0xD0AA, 0xE0AB, 0xF0AC,
+        0x5123, 0x6234, 0x7345, 0x8456, 0x9567, 0xA078, 0xB089, 0xC0A9,
+        0xD0AA, 0xE0AB, 0xF0AC,
+        0x6124, 0x7135, 0x8146, 0x9157, 0xA068, 0xB089, 0xC0A9, 0xD0AA,
+        0xE0AB, 0xF0AC,
+        0x7136, 0x8147, 0x9158, 0xA069, 0xB0A9, 0xC0AA, 0xD0AB,
+        0xE0AC, 0xF0AD,
+        0x8148, 0x9159, 0xA06A, 0xB0AB, 0xC0AC, 0xD0AD, 0xE0AE,
+        0xF0AF,
+        0x915A, 0xA06B, 0xB0AC, 0xC0AD, 0xD0AE, 0xE0AF,
+        0xF0B0,
+        0xA06C, 0xB0AD, 0xC0AE, 0xD0AF, 0xE0B0, 0xF0B1,
+        0xB0AE, 0xC0AF, 0xD0B0, 0xE0B1, 0xF0B2,
+        0xC0B0, 0xD0B1, 0xE0B2, 0xF0B3,
+        0xD0B2, 0xE0B3, 0xF0B4,
+        0xE0B4, 0xF0B5,
+        0xF0B5
+    };
+
+    public static short crc16(byte[] data) {
+        int crc = 0xFFFF;
+
+        for (byte b : data) {
+            crc = (crc >>> 8) ^ CRC16_TABLE[(crc ^ b) & 0xFF];
+        }
+
+        return (short)(~crc & 0xFFFF);
+    }
+
+}
+```
+This design allows the Message class to effectively manage and process different types of messages while ensuring data integrity through checksums and proper fragmentation.
+
+
+### The ```MessageTransmitter```
+
+The ```MessageTransmitter``` class is responsible for sending messages over a Bluetooth connection. It handles the fragmentation of messages, manages retransmissions in case of packet loss, and ensures reliable delivery of data.
+
+```
+public class MessageTransmitter {
+    // Timeout value for packet retransmission (100ms)
+    private static final int TIMEOUT_VALUE = 100; 
+    // Maximum number of retransmissions (3)
+    private static final int MAX_RETRANSMISSIONS = 3;
+
+    // Map to store packets with their sequence numbers
+    private Map<Integer, byte[]> messageMap;
+    // Next sequence number to be sent
+    private int nextSequenceNumber;
+    // Current message being transmitted
+    private Message msg;
+    // Fragmented packets of the current message
+    private byte[][] msgPackets;
+
+    // Input and output streams for Bluetooth communication
+    private InputStream mmIn;
+    private OutputStream mmOut;
+
+    // Timer for packet retransmission
+    private Timer timer;
+
+    public MessageTransmitter(InputStream in, OutputStream out) {
+        messageMap = new HashMap<>();
+        nextSequenceNumber = 0;
+        mmIn = in;
+        mmOut = out;
+    }
+
+    /**
+     * Send a message over Bluetooth
+     * @param message the message to be sent
+     */
+    public void sendMessage(Message message) {
+        try {
+            msg = message;
+            // Fragment the message into packets
+            msgPackets = Message.fragmentPacket(message, 32); // 32 is the MTU size
+            for (byte[] packet : msgPackets) {
+                int sequenceNumber = packet[2] & 0x7F;
+                messageMap.put(sequenceNumber, packet);
+            }
+            int seq = msgPackets[0][2] & 0x7F;
+            nextSequenceNumber = seq - 1;
+
+            // Send the first packet
+            sendPacket(seq, msgPackets[0]);
+        }catch(Exception e) {
+            return;
+        }
+    }
+
+    /**
+     * Send a packet over Bluetooth
+     * @param sequenceNumber the sequence number of the packet
+     * @param packet the packet to be sent
+     */
+    private void sendPacket(int sequenceNumber, byte[] packet) {
+        try {
+            // Send the packet over Bluetooth
+            mmOut.write(packet);
+            // Start a timer for packet retransmission
+            startTimer(sequenceNumber, TIMEOUT_VALUE);
+            // Read ACK from receiver
+            readAckPacket(sequenceNumber);
+        }catch(Exception e) {
+            return;
+        }
+    }
+
+    /**
+     * Start a timer for packet retransmission
+     * @param sequenceNumber the sequence number of the packet
+     * @param timeoutValue the timeout value for retransmission
+     */
+    private void startTimer(int sequenceNumber, int timeoutValue) {
+        timer = new Timer();
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                handlePacketLoss(sequenceNumber);
+            }
+        }, timeoutValue);
+    }
+
+    /**
+     * Handle packet loss by retransmitting the packet
+     * @param sequenceNumber the sequence number of the packet
+     */
+    private void handlePacketLoss(int sequenceNumber) {
+        byte[] packet = messageMap.get(sequenceNumber);
+        if (packet!= null) {
+            // Retransmit the packet
+            sendPacket(sequenceNumber, packet);
+        } else {
+            // Unknown error
+        }
+    }
+
+    /**
+     * Resend the entire message
+     */
+    private void resendMessage() {
+        int retransmissionCount = msg.getRetransmissionCount();
+        if (retransmissionCount < MAX_RETRANSMISSIONS) {
+            msg.setRetransmissionCount(retransmissionCount + 1);
+            // Resend all packets
+            int seq = msgPackets[0][2] & 0x7F;
+            nextSequenceNumber = seq - 1;
+            sendPacket(seq, msgPackets[0]);
+        } else {
+            // Report error: packet lost after max retransmissions
+            return;
+        }
+    }
+
+    /**
+     * Read an ACK packet from the input stream
+     * @param sequenceNumber the sequence number of the packet
+     */
+    private void readAckPacket(int sequenceNumber) {
+        try {
+            byte[] ackBuffer = new byte[12]; // ACK packet is 12 bytes
+            int bytesRead = mmIn.read(ackBuffer);
+			// 0x06 is ACK message type
+			// Check that the sequence number is the same for sender and receiver, otherwise report error
+            if (bytesRead == 12 && ackBuffer[2] == (byte)sequenceNumber && ackBuffer[5] == (byte)0x06) { 
+                receiveAckPacket(sequenceNumber, 1);
+            } else {
+                receiveAckPacket(sequenceNumber, 0);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Receive an ACK packet and handle it accordingly
+     * @param sequenceNumber the sequence number of the packet
+     * @param status the status of the packet (1 = acknowledged, 0 = error)
+     */
+    public void receiveAckPacket(int sequenceNumber, int status) {
+        byte[] packet = messageMap.get(sequenceNumber);
+        if (packet!= null) {
+            if (status == 1) {
+                // Packet acknowledged, send next packet
+                timer.cancel(); // cancel the timer
+                int next = nextSequenceNumber;
+                if (next == 1) {
+                    // All packets are sent
+                    return;
+                }
+                nextSequenceNumber--;
+                sendPacket(next, messageMap.get(next));
+            } else {
+                // Error occurred, resend all packets because we don't know what is going on
+                resendMessage();
+            }
+        }
+    }
+}
+
+
+```
+This class effectively manages the sending of fragmented messages, ensures reliable delivery through retransmission and acknowledgment handling, and maintains the integrity of the communication process.
+
+### The ```MessageReceiver```
+
+The ```MessageReceiver``` class is designed to handle the reception of fragmented messages over a Bluetooth connection. It assembles these fragments into complete messages, manages sequence numbers to ensure proper ordering, and verifies data integrity using checksums.
+
+```
+public class MessageReceiver {
+    private InputStream mmIn;
+    private OutputStream mmOut;
+    private Map<Integer, byte[]> receivedPackets;
+    private int expectedSequenceNumber;
+    private short expectedPacketNumber;
+
+    public MessageReceiver(InputStream in, OutputStream out) {
+        this.mmIn = in;
+        this.mmOut = out;
+        this.receivedPackets = new HashMap<>();
+        this.expectedSequenceNumber = 0x81;
+        this.expectedPacketNumber = -1;
+    }
+
+    public Message receiveMessage() throws IOException {
+		short pn = 0;
+        while (true) {
+            byte[] responseBuffer = new byte[32]; // MTU size is 32 bytes
+            int bytesRead = mmIn.read(responseBuffer);
+
+            if (bytesRead > 0) {
+                byte[] packet = Arrays.copyOfRange(responseBuffer, 0, bytesRead);
+
+                short packetNumber = (short) ((packet[0] << 8) | (packet[1] & 0xFF));
+                byte sequenceNumber = packet[2];
+                short checksum = (short) ((packet[3] << 8) | (packet[4] & 0xFF));
+                byte msgType = packet[5];
+                short msgSize = (short) ((packet[6] << 8) | (packet[7] & 0xFF));
+                byte[] payload = Arrays.copyOfRange(packet, 8, bytesRead);
+
+                // Check sequence number and checksum
+				if ((sequenceNumber & 0x80) == 1) {  // First packet
+					expectedSequenceNumber = sequenceNumber & 0x7F;
+                    receivedPackets.put((int) sequenceNumber, packet);
+					pn = packetNumber;
+
+					// Send ACK for successful packet
+                    sendAck(packetNumber, sequenceNumber, true);
+					// If this is the last packet (sequenceNumber = 1)
+					if (expectedSequenceNumber == 1) {
+						return Message.assemblePacket(receivedPackets.values().toArray(new byte[0][]), 32);
+					}
+                    expectedSequenceNumber--;
+				} else if (sequenceNumber == expectedSequenceNumber && packetNumber == pn && checksum == Message.crc16(payload)) { // Subsequent packet
+                    receivedPackets.put((int) sequenceNumber, packet);
+
+                    // Send ACK for successful packet
+                    sendAck(packetNumber, sequenceNumber, true);
+
+                    // If this is the last packet (sequenceNumber = 1)
+                    if (expectedSequenceNumber == 1) {
+                        return Message.assemblePacket(receivedPackets.values().toArray(new byte[0][]), 32);
+                    }
+                    expectedSequenceNumber--;
+                } else {
+                    // Send ACK for erroneous packet
+                    sendAck(packetNumber, sequenceNumber, false);
+					// The sender should retransmit and it will update the HashMap
+                }
+            }
+        }
+    }
+
+    private void sendAck(short packetNumber, byte sequenceNumber, boolean status) throws IOException {
+        Message ackMessage = Message.createAckMessage(packetNumber, sequenceNumber, status);
+        mmOut.write(ackMessage.payload);
+    }
+}
+```
+The class processes incoming packets by reading them from the input stream, validating their sequence numbers and checksums, and reassembling them into complete messages. It maintains a map of received packets and tracks the expected sequence number to handle packet order. For each packet, it sends an acknowledgment (ACK) back to the sender to confirm successful receipt or indicate errors, thus facilitating reliable communication.
+
+### The ```MessageController```
+
+```MessageController``` orchestrates the communication between the application and the Bluetooth module. It manages the authentication process and handles commands and requests by delegating tasks to MessageTransmitter and MessageReceiver. It ensures that commands such as changing the password or sending door commands are only executed after successful authentication.
+
+```
+public class MessageController {
+    private MessageTransmitter transmitter;
+    private MessageReceiver receiver;
+    private boolean isAuthenticated;
+    private byte[] password;
+
+    public MessageController(InputStream in, OutputStream out, byte[] initialPassword) {
+        this.transmitter = new MessageTransmitter(in, out);
+        this.receiver = new MessageReceiver(in, out);
+        this.isAuthenticated = false;
+        this.password = initialPassword;
+    }
+
+    public void sendDoorCommand(byte[] command) {
+        if (isAuthenticated) {
+            sendDoorCommandInternal(command);
+        } else {
+            authenticateAndExecute(() -> sendDoorCommandInternal(command));
+        }
+    }
+
+    public void sendChangePasswordRequest(byte[] newPassword) {
+        if (isAuthenticated) {
+            sendChangePasswordRequestInternal(newPassword);
+        } else {
+            authenticateAndExecute(() -> sendChangePasswordRequestInternal(newPassword));
+        }
+    }
+
+    private void authenticateAndExecute(Runnable onAuthenticated) {
+        sendAuthRequest(() -> {
+            handleAuthResponse(() -> {
+                isAuthenticated = true;
+                onAuthenticated.run();
+            });
+        });
+    }
+
+    private void sendAuthRequest(Runnable onResponseReceived) {
+        byte[] authPayload = {}; // Empty auth message payload
+        Message authMessage = Message.createAuthMessage(authPayload);
+        transmitter.sendMessage(authMessage);
+        onResponseReceived.run();
+    }
+
+    private void sendSyncTimestampRequest(Runnable onResponseReceived) {
+        long currentTimestamp = System.currentTimeMillis() / 1000;
+        Message syncTimestampMessage = Message.createSyncTimestampMessage(currentTimestamp);
+        transmitter.sendMessage(syncTimestampMessage);
+        onResponseReceived.run();
+    }
+
+    private void sendChallengeResponse(byte[] challenge, Runnable onResponseReceived) {
+        byte[] passwordHash = hashPassword(challenge, password);
+        Message challengeResponseMessage = Message.createChallengeResponseMessage(challenge, passwordHash);
+        transmitter.sendMessage(challengeResponseMessage);
+        onResponseReceived.run();
+    }
+
+    private void sendDoorCommandInternal(byte[] command) {
+        Message doorCommandMessage = Message.createDoorCommandMessage(command);
+        transmitter.sendMessage(doorCommandMessage);
+        handleResponse();
+    }
+
+    private void sendChangePasswordRequestInternal(byte[] newPassword) {
+        Message changePasswordMessage = Message.createChangePasswordMessage(newPassword);
+        transmitter.sendMessage(changePasswordMessage);
+        handleResponse(newPassword);
+    }
+
+    private void handleAuthResponse(Runnable onAuthenticated) {
+        Message response = handleResponse();
+        if (response.msgType == Message.MSG_TYPE_SYNC_TIMESTAMP) {
+            sendSyncTimestampRequest(() -> {
+                handleResponse();
+                sendAuthRequest(onAuthenticated);
+            });
+        } else if (response.msgType == Message.MSG_TYPE_CHALLENGE_RESPONSE) {
+            byte[] challenge = Arrays.copyOfRange(response.payload, 0, response.payload.length);
+            sendChallengeResponse(challenge, onAuthenticated);
+        }
+    }
+
+    private Message handleResponse() {
+        return handleResponse(null);
+    }
+
+    private Message handleResponse(byte[] newPassword) {
+        try {
+            Message response = receiver.receiveMessage();
+            if (response.msgType == Message.MSG_TYPE_NOTIFY) {
+                handleNotify(response);
+            }
+            if (response.msgType == Message.MSG_TYPE_CHANGE_PASSWORD && newPassword != null) {
+                password = newPassword;
+            }
+            return response;
+        } catch (IOException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    private void handleNotify(Message notifyMessage) {
+        // Handle the notify message
+        short packetNumber = (short) ((notifyMessage.payload[0] << 8) | (notifyMessage.payload[1] & 0xFF));
+        byte messageType = notifyMessage.payload[2];
+        short result = (short) ((notifyMessage.payload[3] << 8) | (notifyMessage.payload[4] & 0xFF));
+        byte[] desc = Arrays.copyOfRange(notifyMessage.payload, 5, notifyMessage.payload.length);
+
+        // Process the notification based on the messageType and result
+        
+    }
+
+	private byte[] hashPassword(byte[] challenge, byte[] password) {
+		int length = Math.max(challenge.length, password.length);
+		byte[] hashed = new byte[length];
+
+		for (int i = 0; i < length; i++) {
+			byte challengeByte = (i < challenge.length) ? challenge[i] : 0;
+			byte passwordByte = (i < password.length) ? password[i] : 0;
+			hashed[i] = (byte) (challengeByte ^ passwordByte);
+		}
+
+		return hashed;
+	}
+
+}
+```
+
+The controller handles the authentication process by sending authentication requests and processing responses. It uses the sendAuthRequest, sendSyncTimestampRequest, and sendChallengeResponse methods to manage various stages of authentication. Once authenticated, it proceeds to execute commands like sendDoorCommand and sendChangePasswordRequest. The handleResponse method processes responses from the receiver, ensuring that the operations are completed correctly and updating the internal state as needed.
+
+
+
 
 ###  Next Steps
+
+Despite the complexity, I'm proud of what we've accomplished. We've created a system that's not only functional but also secure and user-friendly. And with the sequence diagram, we can see exactly how all the different components fit together to create a seamless user experience.
 
 So what's next? Well, now that we have a complete system including hardware and software, it's time to test it out and see how it works in practice. 
 You could download the whole project source code and test if yourself. Keep in mind that the UI is urgly as I am not ready to spend time on it.
@@ -1058,3 +1695,16 @@ You could download the whole project source code and test if yourself. Keep in m
 And then, of course, there's the possibility of adding even more features to the system. Maybe we could add support for multiple doors or integrate with other smart home devices. The possibilities are endless, and I'm excited to see where this project will take us in the future.
 
 
+## Frequently Asked Questions
+
+### Relay Connection Conundrum: NO or NC?
+
+Initially, I connected the output wires to the common and NO (Normally Open) side of the relay,
+assuming it was the correct configuration. My reasoning was that the switch would be voltage-free
+initially, and then we would apply voltage to it.
+
+### The App's Unexpected Behavior
+
+Interestingly, the app now briefly disconnects the switch and then reconnects it to the NC side.
+This is the opposite of what I initially expected, but fortunately, the app and all switches now
+work seamlessly together.
