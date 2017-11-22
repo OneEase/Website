@@ -558,10 +558,10 @@ To implement packet fragmentation and reassembly, we need to design a packet hea
 
 | Field | Length(bytes) | Description | Is New Extended |
 |----------|----------|----------|----------|
-| Packet Number (PN)| 2   | Unique packet number for reassembly| new |
+| Packet Number (PN)| 2   | Unique packet number for reassembly. Each message should have a different PN| new |
 | Sequence Number (SN) | 1| Sequence number for packet ordering. The most significant bit(MSB) is set to 1 for first packet,otherwise MSB is 0. The 7 least significant bits (LSB) are used to store the packet sequence number in decreasing order| new |
-| Checksum (CK) | 2	| checksum for error detection. CRC-16 is used for checksum and all bytes except CK itself are calculated| new |
-| Message Type (MT) | 1| identify the message type| |
+| Checksum (CK) | 2	| checksum for error detection. CRC-16 is used for payload checksum. The checksum of the first packet is calculated upon total packets, the subsequent packet checksum is calculated on packet payload  | new |
+| Message Type (MT) | 1| Identify the message type| |
 | Message Size (MS) | 2| Length of the packet fragment payload (or total length for first packet to help checksum verfication) | |
 | Payload | variable | Packet payload data | |
 
@@ -633,52 +633,54 @@ Here's an updated code snippet of ```class Message``` in the Android app to supp
 
 
 ```
-public static short globalPktNO = 0;
+	public static short globalPktNO = 0;
 
-public static synchronized short generatePacketNumber() {
-    return ++globalPktNO;
-}
+	public static synchronized short generatePacketNumber() {
+    	return ++globalPktNO;
+	}
 
-public static byte[][] fragmentPacket(Message msg, int mtuSize) {
-	if (mtuSize <= 8) {
-        throw new IllegalArgumentException("MTU size must be greater than 8");
-    }
+	public static byte[][] fragmentPacket(Message msg, int mtuSize){
+		if (mtuSize <= 8) {
+            return null;
+		}
 
-	short pktID = Message.generatePacketNumber();
-    int numPackets = (int) Math.ceil((double) msg.payload.length / (mtuSize - 8));
-    byte[][] packets = new byte[numPackets][];
+		short pktID = Message.generatePacketNumber();
+		int numPackets = (int) Math.ceil((double) msg.payload.length / (mtuSize - 8));
+		byte[][] packets = new byte[numPackets][];
 
-    for (int i = 0; i < numPackets; i++) {
-        int packetSize = Math.min(mtuSize - 8, msg.payload.length - i * (mtuSize - 8));
-        byte[] packet = new byte[mtuSize];
+		for (int i = 0; i < numPackets; i++) {
+			int packetSize = Math.min(mtuSize - 8, msg.payload.length - i * (mtuSize - 8));
+			byte[] packet = new byte[mtuSize];
 
-		// set Packet Number
-        packet[0] = (byte) (pktID >> 8); // pktNO
-        packet[1] = (byte) (pktID & 0xFF); // pktNO
+			// set Packet Number
+			packet[0] = (byte) (pktID >> 8); // pktNO
+			packet[1] = (byte) (pktID & 0xFF); // pktNO
 
-		// set Sequence Number
-		packet[2] = (byte) ((i == 0) ? 0x80 : 0x00); // seqNO MSB
-		packet[2] = (byte) (packet[2] | (packetSize - i)); // seqNO
+			// set Sequence Number
+			packet[2] = (byte) ((i == 0) ? 0x80 : 0x00); // seqNO MSB
+			packet[2] = (byte) (packet[2] | (numPackets - i)); // seqNO
+			
+			// set Message Type
+			packet[5] = (byte) msg.msgType; // msgType
 
-        // set Checksum
-		short chksum = crc16(msg.payload, packetSize);
-        packet[3] = (byte) (chksum >> 8); // checksum high byte
-        packet[4] = (byte) (chksum & 0xFF); // checksum low byte
+			// set Message Size
+			short msize = (short)((i == 0) ? msg.payload.length : packetSize);
+			packet[6] = (byte) ((msize >> 8) & 0xFF); // message size high byte
+			packet[7] = (byte) (msize & 0xFF); // message size low byte
 
-		// set Message Type
-        packet[5] = (byte) msg.msgType; // msgType
+            // set current packet payload
+            byte[] pdata = new byte[packetSize];
+			System.arraycopy(msg.payload, i * (mtuSize - 8), packet, 8, packetSize);
+			System.arraycopy(packet, 8, pdata, 0, packetSize);
+            // set Checksum
+			short chksum = crc16((i == 0)? msg.payload : pdata);
+			packet[3] = (byte) (chksum >> 8); // checksum high byte
+			packet[4] = (byte) (chksum & 0xFF); // checksum low byte
+			packets[i] = packet;
 
-		// set Message Size
-		short msize = (i == 0) ? msg.payload.length : packetSize;
-        packet[6] = (byte) ((msize >> 8) & 0xFF); // message size high byte
-        packet[7] = (byte) (msize & 0xFF); // message size low byte
-
-        System.arraycopy(msg.payload, i * (mtuSize - 8), packet, 8, packetSize);
-        packets[i] = packet;
-    }
-    return packets;
-}
-
+		}
+		return packets;
+	}
 
 
 ```
@@ -698,67 +700,124 @@ At the receiving end, we reassemble the packets using the following algorithm:
 Here's an updated code snippet of ```class Message``` in the Android app to support packet reassembly:
 
 ```
-public static Message assemblePacket(byte[][] packets, int mtuSize) {
-    if (packets == null || packets.length == 0) {
-        throw new IllegalArgumentException("No packets to assemble");
-    }
-
-    // Extract the packet number, sequence number, total message size and message type from the first packet
-    short pktNO = (short) (((packets[0][0] & 0xFF) << 8) | (packets[0][1] & 0xFF));
-    byte seqNO = packets[0][2];
-    byte msgType = packets[0][5];
-	short totalSize = (short) (((packets[0][6] & 0xFF) << 8) | (packets[0][7] & 0xFF));
-
-    // Create a new byte array to store the reassembled payload
-    byte[] payload = new byte[totalSize];
-
-    // Reassemble the payload
-    int offset = 0;
-    for (byte[] packet : packets) {
-        int packetSize = packet.length - 8;
-		if (offset == 0) {
-			packetSize = mtuSize - 8;
+	public static Message assemblePacket(byte[][] packets, int mtuSize) throws IOException{
+		if (packets == null || packets.length == 0) {
+			return null;
 		}
-        System.arraycopy(packet, 8, payload, offset, packetSize);
-        offset += packetSize;
-    }
 
-    // Verify the checksum
-    short chksum = crc16(payload, totalSize);
-    if (chksum!= ((short) (((packets[0][3] & 0xFF) << 8) | (packets[0][4] & 0xFF)))) {
-        throw new IOException("Checksum mismatch");
-    }
+		// Extract the packet number, sequence number, total message size and message type from the first packet
+		short pktNO = (short) (((packets[0][0] & 0xFF) << 8) | (packets[0][1] & 0xFF));
+		byte seqNO = packets[0][2];
+		byte msgType = packets[0][5];
+		short totalSize = (short) (((packets[0][6] & 0xFF) << 8) | (packets[0][7] & 0xFF));
 
-    // Create a new Message object with the reassembled payload
-    Message msg = new Message(msgType, (short) totalSize, payload);
-    return msg;
-}
+		// Create a new byte array to store the reassembled payload
+		byte[] payload = new byte[totalSize];
+
+		// Reassemble the payload
+		int offset = 0;
+		for (byte[] packet : packets) {
+		    int packetSize = (short) (((packet[6] & 0xFF) << 8) | (packet[7] & 0xFF));
+			if (offset == 0) {
+			    packetSize = Math.min(mtuSize - 8, packetSize);
+			}
+			System.arraycopy(packet, 8, payload, offset, packetSize);
+			offset += packetSize;
+		}
+
+		// Verify the checksum
+		short chksum = crc16(payload);
+		if (chksum!= ((short) (((packets[0][3] & 0xFF) << 8) | (packets[0][4] & 0xFF)))) {
+			throw new IOException("Checksum mismatch");
+		}
+
+		// Create a new Message object with the reassembled payload
+		Message msg = new Message(msgType, (short) totalSize, payload);
+		return msg;
+	}
+
+
 ```
 
 
-### Packet Transmission Example
+### Packet Fragmentation And Reassembly Example
 
-Here is an example of packet fragmentation and reassembly for a 120-byte data payload with an MTU size of 32 bytes:
+We execute the ```fragmentPacket``` and ```assemblePacket``` to view the output through the following funtion in ```Message```:
 
-| Packet Number (PN) | Sequence Number (SN)	| Checksum (CK)	| Message Type (MT)	| Message Size (MS)	 | Payload |
+```
+    public static void log(byte[] packet) {
+        if (packet == null || packet.length < 8) {
+            System.out.println("Invalid packet");
+            return;
+        }
+
+        short pktNO = (short) (((packet[0] & 0xFF) << 8) | (packet[1] & 0xFF));
+        byte seqNO = packet[2];
+        short checksum = (short) (((packet[3] & 0xFF) << 8) | (packet[4] & 0xFF));
+        byte msgType = packet[5];
+        short totalSize = (short) (((packet[6] & 0xFF) << 8) | (packet[7] & 0xFF));
+
+        System.out.println("Packet Details:");
+        System.out.println("  Packet Number: " + String.format("0x%04X", pktNO));
+        System.out.println("  Sequence Number: " + String.format("0x%02X", seqNO));
+        System.out.println("  Checksum: " + String.format("0x%04X", checksum));
+        System.out.println("  Message Type: " + String.format("0x%02X", msgType));
+        System.out.println("  Total Size: " + String.format("0x%04X", totalSize));
+        StringBuilder sb = new StringBuilder();
+        for (byte b : packet) {
+            sb.append(String.format("%02x ", b));
+        }
+        System.out.println("Raw packet hex string:");
+        System.out.println(sb.toString());
+    }
+```
+
+#### Packet Fragmentation Size: 5
+
+Here is an example of packet fragmentation and reassembly for a 120-byte data payload with an MTU size of 32 bytes.
+
+The payload for an auth message is: ```"auth_request000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"```. 
+
+Here are the outputs:
+
+| Packet Number (PN) | Sequence Number (SN)	| Checksum (CK)	| Message Type (MT)	| Message Size (MS)	 | Payload (in hex format)|
 |----------|----------|----------|----------|----------|----------|
-| 0x0001(Unique packet number)| 0x85(First packet, MSB set to 1, rest bits set to 0x5)	| Calculated CRC-16 checksum | 0x01(Authentication Message) | 0x0078(whole 120 bytes payload)	| First 24 bytes of data |
-| 0x0001(Unique packet number)| 0x04(Second packet, MSB set to 0)	| Calculated CRC-16 checksum | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| Next 24 bytes of data |
-| 0x0001(Unique packet number)| 0x03(Third packet, MSB set to 0)	| Calculated CRC-16 checksum | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| Next 24 bytes of data |
-| 0x0001(Unique packet number)| 0x02(Fourth packet, MSB set to 0)	| Calculated CRC-16 checksum | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| Next 24 bytes of data |
-| 0x0001(Unique packet number)| 0x01(Last packet, MSB set to 0)	| Calculated CRC-16 checksum | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| Last 24 bytes of data |
+| 0x0001(Unique packet number)| 0x85(First packet, MSB set to 1, rest bits set to 0x5)	| 0x27AB(CRC-16 checksum) | 0x01(Authentication Message) | 0x0078(whole 120 bytes payload)	| 61 75 74 68 5f 72 65 71 75 65 73 74 30 30 30 30 30 30 30 30 30 30 30 30 (First 24 bytes of data) |
+| 0x0001(Unique packet number)| 0x04(Second packet, MSB set to 0)	| 0x0761(CRC-16 checksum) | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 (Next 24 bytes of data) |
+| 0x0001(Unique packet number)| 0x03(Third packet, MSB set to 0)	| 0x0761(CRC-16 checksum) | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 (Next 24 bytes of data) |
+| 0x0001(Unique packet number)| 0x02(Fourth packet, MSB set to 0)	| 0x0761(CRC-16 checksum) | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 (Next 24 bytes of data) |
+| 0x0001(Unique packet number)| 0x01(Fifth packet, MSB set to 0)	| 0x0761(CRC-16 checksum) | 0x01(Authentication Message) | 0x0018(24 bytes payload)	| 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 (Last 24 bytes of data) |
 
-In this example, the 120-byte data payload is divided into 5 packets, each with a maximum size of 32 bytes (MTU size). The Packet Number (PN) field is set to a unique value, and the Sequence Number (SN) field is used to determine the correct order of the packets. The Checksum (CK) field is calculated using a checksum algorithm (e.g., CRC-16) to detect errors during transmission.
+In this test, the 120-byte data payload is divided into 5 packets, each with a maximum size of 32 bytes (MTU size). The Packet Number (PN) field is set to a unique value, and the Sequence Number (SN) field is used to determine the correct order of the packets. The Checksum (CK) field is calculated using a checksum algorithm (e.g., CRC-16) to detect errors during transmission.
 
 At the receiving end, the packets are reassembled using the PN and SN fields, and the CK field is used to verify the integrity of the reassembled packet.
 
-### Another Packet Transmission Example
 
-How about a short packet? Below is an example for sending 24-byte data payload with an MTU size of 32 bytes:
 
-| Packet Number (PN) | Sequence Number (SN)	| Checksum (CK)	| Message Type (MT)	| Message Size (MS)	 | Payload |
+#### Packet Fragmentation Size: 2
+
+Here is an example of packet fragmentation and reassembly for a 45-byte data payload with an MTU size of 32 bytes.
+
+ The payload for an auth message is: ```"auth_request::dummy_payload123456789123456789"```.
+
+Here are the outputs:
+
+| Packet Number (PN) | Sequence Number (SN)	| Checksum (CK)	| Message Type (MT)	| Message Size (MS)	 | Payload (in hex format)|
 |----------|----------|----------|----------|----------|----------|
-| 0x0002(Unique packet number)| 0x81(First packet, MSB set to 1, rest bits set to 0x1)	| Calculated CRC-16 checksum | 0x03(Door Command) | 0x0018(whole 24 bytes payload)	| whole 24 bytes of data |
+| 0x0002(Unique packet number)| 0x82(First packet, MSB set to 1, rest bits set to 0x2)	| 0x8B0B(CRC-16 checksum) | 0x01(Authentication Message) | 0x002D(whole 45 bytes payload)	| 61 75 74 68 5f 72 65 71 75 65 73 74 3a 3a 64 75 6d 6d 79 5f 70 61 79 6c (First 24 bytes of data) |
+| 0x0002(Unique packet number)| 0x01(Second packet, MSB set to 0)	| 0x1F8A(CRC-16 checksum) | 0x01(Authentication Message) | 0x0015(21 bytes payload)	| 6f 61 64 31 32 33 34 35 36 37 38 39 31 32 33 34 35 36 37 38 39 (Last 21 bytes of data) |
+
+#### Packet Fragmentation Size: 1
+
+Here is an example of packet fragmentation and reassembly for a 18-byte data payload with an MTU size of 32 bytes.
+
+The payload for an auth message is: ```"dummy_auth_request"```.
+
+Here are the outputs:
+
+| Packet Number (PN) | Sequence Number (SN)	| Checksum (CK)	| Message Type (MT)	| Message Size (MS)	 | Payload (in hex format)|
+|----------|----------|----------|----------|----------|----------|
+| 0x0003(Unique packet number)| 0x81(First packet, MSB set to 1, rest bits set to 0x1)	| 0x9E16(CRC-16 checksum) | 0x01(Authentication Message) | 0x0012(whole 18 bytes payload)	| 64 75 6d 6d 79 5f 61 75 74 68 5f 72 65 71 75 65 73 74 (Whole 18 bytes of data) |
 
 
 
@@ -767,45 +826,52 @@ How about a short packet? Below is an example for sending 24-byte data payload w
 Here's the code snippet of ```crc16``` in C to support checksum: 
 
 ```
-uint16_t crc16(uint8_t *data, uint16_t len) {
-    uint16_t crc = 0xFFFF;
-    uint8_t i;
+const unsigned short crc16_table[256] = {
+	0x0000, 0x1189, 0x2312, 0x329B, 0x4624, 0x57AD, 0x6536, 0x74BF,
+    0x8C48, 0x9DC1, 0xAF5A, 0xBED3, 0xCA6C, 0xDBE5, 0xE97E, 0xF8F7,
+    0x0919, 0x1890, 0x2A0B, 0x3B82, 0x4F3D, 0x5EB4, 0x6C2F, 0x7DA6,
+    0x8551, 0x94D8, 0xA643, 0xB7CA, 0xC375, 0xD2FC, 0xE067, 0xF1EE,
+    0x1232, 0x03BB, 0x3120, 0x20A9, 0x5416, 0x459F, 0x7704, 0x668D,
+    0x9E7A, 0x8FF3, 0xBD68, 0xACE1, 0xD85E, 0xC9D7, 0xFB4C, 0xEAC5,
+    0x1B2B, 0x0AA2, 0x3839, 0x29B0, 0x5D0F, 0x4C86, 0x7E1D, 0x6F94,
+    0x9763, 0x86EA, 0xB471, 0xA5F8, 0xD147, 0xC0CE, 0xF255, 0xE3DC,
+    0x2464, 0x35ED, 0x0776, 0x16FF, 0x6240, 0x73C9, 0x4152, 0x50DB,
+    0xA82C, 0xB9A5, 0x8B3E, 0x9AB7, 0xEE08, 0xFF81, 0xCD1A, 0xDC93,
+    0x2D7D, 0x3CF4, 0x0E6F, 0x1FE6, 0x6B59, 0x7AD0, 0x484B, 0x59C2,
+    0xA135, 0xB0BC, 0x8227, 0x93AE, 0xE711, 0xF698, 0xC403, 0xD58A,
+    0x3656, 0x27DF, 0x1544, 0x04CD, 0x7072, 0x61FB, 0x5360, 0x42E9,
+    0xBA1E, 0xAB97, 0x990C, 0x8885, 0xFC3A, 0xEDB3, 0xDF28, 0xCEA1,
+    0x3F4F, 0x2EC6, 0x1C5D, 0x0DD4, 0x796B, 0x68E2, 0x5A79, 0x4BF0,
+    0xB307, 0xA28E, 0x9015, 0x819C, 0xF523, 0xE4AA, 0xD631, 0xC7B8,
+    0x48C8, 0x5941, 0x6BDA, 0x7A53, 0x0EEC, 0x1F65, 0x2DFE, 0x3C77,
+    0xC480, 0xD509, 0xE792, 0xF61B, 0x82A4, 0x932D, 0xA1B6, 0xB03F,
+    0x41D1, 0x5058, 0x62C3, 0x734A, 0x07F5, 0x167C, 0x24E7, 0x356E,
+    0xCD99, 0xDC10, 0xEE8B, 0xFF02, 0x8BBD, 0x9A34, 0xA8AF, 0xB926,
+    0x5AFA, 0x4B73, 0x79E8, 0x6861, 0x1CDE, 0x0D57, 0x3FCC, 0x2E45,
+    0xD6B2, 0xC73B, 0xF5A0, 0xE429, 0x9096, 0x811F, 0xB384, 0xA20D,
+    0x53E3, 0x426A, 0x70F1, 0x6178, 0x15C7, 0x044E, 0x36D5, 0x275C,
+    0xDFAB, 0xCE22, 0xFCB9, 0xED30, 0x998F, 0x8806, 0xBA9D, 0xAB14,
+    0x6CAC, 0x7D25, 0x4FBE, 0x5E37, 0x2A88, 0x3B01, 0x099A, 0x1813,
+    0xE0E4, 0xF16D, 0xC3F6, 0xD27F, 0xA6C0, 0xB749, 0x85D2, 0x945B,
+    0x65B5, 0x743C, 0x46A7, 0x572E, 0x2391, 0x3218, 0x0083, 0x110A,
+    0xE9FD, 0xF874, 0xCAEF, 0xDB66, 0xAFD9, 0xBE50, 0x8CCB, 0x9D42,
+    0x7E9E, 0x6F17, 0x5D8C, 0x4C05, 0x38BA, 0x2933, 0x1BA8, 0x0A21,
+    0xF2D6, 0xE35F, 0xD1C4, 0xC04D, 0xB4F2, 0xA57B, 0x97E0, 0x8669,
+    0x7787, 0x660E, 0x5495, 0x451C, 0x31A3, 0x202A, 0x12B1, 0x0338,
+    0xFBCF, 0xEA46, 0xD8DD, 0xC954, 0xBDEB, 0xAC62, 0x9EF9, 0x8F70
+};
 
-    while (len--) {
-        crc = (crc >> 8) ^ crc16_table[(crc & 0xFF) ^ *data++];
+unsigned short crc16(char *data, unsigned short length) {
+	unsigned short crc = 0xFFFF;
+
+    for (unsigned int i = 0; i < length; i++) {
+        crc = (crc >> 8) ^ crc16_table[(crc ^ data[i]) & 0xFF];
     }
 
-    return ~crc;
+    // Return the computed CRC value
+    return crc;
 }
 
-const uint16_t crc16_table[256] = {
-    0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
-    0x8008, 0x9029, 0xA04A, 0xB06B, 0xC08C, 0xD0AD, 0xE0CE, 0xF0EF,
-    0x1081, 0x1082, 0x2083, 0x3084, 0x4085, 0x50A6, 0x60C7, 0x70E8,
-    0x8009, 0x902A, 0xA04B, 0xB06C, 0xC08D, 0xD0AE, 0xE0CF, 0xF0EF,
-    0x2102, 0x3213, 0x4324, 0x5435, 0x6546, 0x7657, 0x8768, 0x9879,
-    0xA09A, 0xB0AB, 0xC0AC, 0xD0AD, 0xE0AE, 0xF0AF,
-    0x3121, 0x4232, 0x5343, 0x6454, 0x7565, 0x8676, 0x9787, 0xA098,
-    0xB0A9, 0xC0AA, 0xD0AB, 0xE0AC, 0xF0AD,
-    0x4122, 0x5233, 0x6344, 0x7455, 0x8566, 0x9677, 0xA078, 0xB089,
-    0xC0A9, 0xD0AA, 0xE0AB, 0xF0AC,
-    0x5123, 0x6234, 0x7345, 0x8456, 0x9567, 0xA078, 0xB089, 0xC0A9,
-    0xD0AA, 0xE0AB, 0xF0AC,
-    0x6124, 0x7135, 0x8146, 0x9157, 0xA068, 0xB089, 0xC0A9, 0xD0AA,
-    0xE0AB, 0xF0AC,
-    0x7136, 0x8147, 0x9158, 0xA069, 0xB0A9, 0xC0AA, 0xD0AB,
-    0xE0AC, 0xF0AD,
-    0x8148, 0x9159, 0xA06A, 0xB0AB, 0xC0AC, 0xD0AD, 0xE0AE,
-    0xF0AF,
-    0x915A, 0xA06B, 0xB0AC, 0xC0AD, 0xD0AE, 0xE0AF,
-    0xF0B0,
-    0xA06C, 0xB0AD, 0xC0AE, 0xD0AF, 0xE0B0, 0xF0B1,
-    0xB0AE, 0xC0AF, 0xD0B0, 0xE0B1, 0xF0B2,
-    0xC0B0, 0xD0B1, 0xE0B2, 0xF0B3,
-    0xD0B2, 0xE0B3, 0xF0B4,
-    0xE0B4, 0xF0B5,
-    0xF0B5
-};
 
 ```
 
@@ -819,14 +885,14 @@ To ensure reliable transmission of packets, we need to detect packet loss and re
 
 #### Packet Acknowledgment
 
-The receiving end sends an acknowledgment packet (ACK) for each packet received. The ACK packet includes the Packet Number (PN),Sequence Number (SN) and a status field indicating whether the packet was received correctly. The error ACK is sent if receiving end receives incorrect packet (e.g., checksum fails, wrong SN).
+The receiving end sends an acknowledgment packet (ACK) for each packet received. The ACK packet includes the Packet Number (PN),Sequence Number (SN) and a status field indicating whether the packet was received correctly. The error ACK is sent if receiving end receives incorrect packet (e.g., checksum fails, wrong SN, etc.).
 
 Here's an updated code snippet in the Android app to support ACK:
 
 ```
 public static final byte MSG_TYPE_ACK = 0x06;
 public static Message createAckMessage(short packetNumber, byte sequenceNumber, boolean status) {
-    byte[] payload = new byte[3];
+    byte[] payload = new byte[4];
     payload[0] = (byte) (packetNumber >> 8);
     payload[1] = (byte) (packetNumber & 0xFF);
     payload[2] = sequenceNumber;
@@ -843,8 +909,8 @@ If the transmitting end does not receive an ACK packet within a certain time per
 * The transmitting end maintains a timer for each packet sent.
 * When a packet is sent, the timer is started with a timeout value (e.g., 100ms).
 * If the transmitting end receives an ACK packet for the sent packet before the timer expires, the timer is cancelled.
-* If an ACK packet of wrong status code is received, the transmitting end will restart the message transmission.
-* If the timer expires, the packet is considered lost, and the transmitting end will start retransmitting the packet.
+* If an ACK packet of wrong status code is received, the transmitting end will restart all packets of the message transmission.
+* If the timer expires, the packet is considered lost, and the transmitting end will start retransmitting the same packet.
 * If the retransmission counter exceeds a maximum value (e.g., 3), the transmitting end gives up retransmitting the message and reports an error.
 
 Here's an updated code snippet in the Android app to support packet retransmission:
@@ -884,18 +950,23 @@ public class MessageTransmitter {
      * @param message the message to be sent
      */
     public void sendMessage(Message message) {
-        msg = message;
-        // Fragment the message into packets
-        msgPackets = Message.fragmentPacket(message, 32); // 32 is the MTU size
-        for (byte[] packet : msgPackets) {
-            int sequenceNumber = packet[2] & 0x7F;
-            messageMap.put(sequenceNumber, packet);
-        }
-        int seq = msgPackets[0][2] & 0x7F;
-        nextSequenceNumber = seq - 1;
+        try {
+            msg = message;
+            // Fragment the message into packets
+            msgPackets = Message.fragmentPacket(message, 32); // 32 is the MTU size
+            for (byte[] packet : msgPackets) {
+                int sequenceNumber = packet[2];
+                messageMap.put(sequenceNumber, packet);
+            }
+            int seq = msgPackets[0][2] & 0x7F;
+            nextSequenceNumber = seq - 1;
 
-        // Send the first packet
-        sendPacket(seq, msgPackets[0]);
+            // Send the first packet
+            sendPacket(msgPackets[0][2], msgPackets[0]);
+        }catch(Exception e) {
+            e.printStackTrace();
+            return;
+        }
     }
 
     /**
@@ -904,10 +975,17 @@ public class MessageTransmitter {
      * @param packet the packet to be sent
      */
     private void sendPacket(int sequenceNumber, byte[] packet) {
-        // Send the packet over Bluetooth
-        mmOut.write(packet);
-        // Start a timer for packet retransmission
-        startTimer(sequenceNumber, TIMEOUT_VALUE);
+        try {
+            Message.log(packet);
+            // Send the packet over Bluetooth
+            mmOut.write(packet);
+            // Start a timer for packet retransmission
+            startTimer(sequenceNumber, TIMEOUT_VALUE);
+            // Read ACK from receiver
+            readAckPacket(sequenceNumber);
+        }catch(Exception e) {
+            return;
+        }
     }
 
     /**
@@ -949,10 +1027,36 @@ public class MessageTransmitter {
             // Resend all packets
             int seq = msgPackets[0][2] & 0x7F;
             nextSequenceNumber = seq - 1;
-            sendPacket(seq, msgPackets[0]);
+            sendPacket(msgPackets[0][2], msgPackets[0]);
         } else {
             // Report error: packet lost after max retransmissions
             return;
+        }
+    }
+
+    /**
+     * Read an ACK packet from the input stream
+     * @param sequenceNumber the sequence number of the packet
+     */
+    private void readAckPacket(int sequenceNumber) {
+        try {
+            byte[] ackBuffer = new byte[32]; // ACK packet is 12 bytes
+            int bytesRead = mmIn.read(ackBuffer);
+			
+			/* 
+                Check that: 
+                1. sequence number is the same for sender and receiver, otherwise report error.
+                    ackBuffer[10] is the sequence number in ack message: 8(header size) + 2(payload offset)
+			    2. message type is ACK. 0x06 is ACK message type
+            */
+            if (ackBuffer[10] == (byte)sequenceNumber && ackBuffer[5] == (byte)0x06) { 
+                receiveAckPacket(sequenceNumber, 1);
+            } else {
+				//System.out.println("ack fail");	
+                receiveAckPacket(sequenceNumber, 0);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 
@@ -968,19 +1072,23 @@ public class MessageTransmitter {
                 // Packet acknowledged, send next packet
                 timer.cancel(); // cancel the timer
                 int next = nextSequenceNumber;
-                if (next == 1) {
+                if (next == 0) {
                     // All packets are sent
                     return;
                 }
                 nextSequenceNumber--;
                 sendPacket(next, messageMap.get(next));
             } else {
-                // Error occurred, resend all packets
+                timer.cancel(); // cancel the timer
+                // Error occurred, resend all packets because we don't know what is going on
                 resendMessage();
             }
+        }else {
+            System.out.println("unknown seq for receiveAckPacket");
         }
     }
 }
+
 
 ```
 
@@ -1092,6 +1200,7 @@ To simplify the implementation, I design four class in app to make it clear: Mes
 The ```Message``` class is designed to encapsulate the communication protocol used for message passing between components.
 
 ```
+
 public class Message {
     public byte msgType;
     public short msgSize;
@@ -1196,7 +1305,7 @@ public class Message {
 
 			// set Sequence Number
 			packet[2] = (byte) ((i == 0) ? 0x80 : 0x00); // seqNO MSB
-			packet[2] = (byte) (packet[2] | (packetSize - i)); // seqNO
+			packet[2] = (byte) (packet[2] | (numPackets - i)); // seqNO
 			
 			// set Message Type
 			packet[5] = (byte) msg.msgType; // msgType
@@ -1206,16 +1315,48 @@ public class Message {
 			packet[6] = (byte) ((msize >> 8) & 0xFF); // message size high byte
 			packet[7] = (byte) (msize & 0xFF); // message size low byte
 
+            // set current packet payload
+            byte[] pdata = new byte[packetSize];
 			System.arraycopy(msg.payload, i * (mtuSize - 8), packet, 8, packetSize);
+			System.arraycopy(packet, 8, pdata, 0, packetSize);
             // set Checksum
-			short chksum = crc16((i == 0)? msg.payload : packet);
+			short chksum = crc16((i == 0)? msg.payload : pdata);
 			packet[3] = (byte) (chksum >> 8); // checksum high byte
 			packet[4] = (byte) (chksum & 0xFF); // checksum low byte
 			packets[i] = packet;
+            Message.log(packet);
 
 		}
 		return packets;
 	}
+    
+    public static void log(byte[] packet) {
+        if (packet == null || packet.length < 8) {
+            System.out.println("Invalid packet");
+            return;
+        }
+
+        short pktNO = (short) (((packet[0] & 0xFF) << 8) | (packet[1] & 0xFF));
+        byte seqNO = packet[2];
+        short checksum = (short) (((packet[3] & 0xFF) << 8) | (packet[4] & 0xFF));
+        byte msgType = packet[5];
+        short totalSize = (short) (((packet[6] & 0xFF) << 8) | (packet[7] & 0xFF));
+
+        System.out.println("Packet Details:");
+        System.out.println("  Packet Number: " + String.format("0x%04X", pktNO));
+        System.out.println("  Sequence Number: " + String.format("0x%02X", seqNO));
+        System.out.println("  Checksum: " + String.format("0x%04X", checksum));
+        System.out.println("  Message Type: " + String.format("0x%02X", msgType));
+        System.out.println("  Total Size: " + String.format("0x%04X", totalSize));
+        StringBuilder sb = new StringBuilder();
+        for (byte b : packet) {
+            sb.append(String.format("%02x ", b));
+        }
+		System.out.println("Raw packet hex string:");
+        System.out.println(sb.toString());
+    }
+
+
 	public static Message assemblePacket(byte[][] packets, int mtuSize) throws IOException{
 		if (packets == null || packets.length == 0) {
 			return null;
@@ -1233,10 +1374,11 @@ public class Message {
 		// Reassemble the payload
 		int offset = 0;
 		for (byte[] packet : packets) {
-			int packetSize = packet.length - 8;
+		    int packetSize = (short) (((packet[6] & 0xFF) << 8) | (packet[7] & 0xFF));
 			if (offset == 0) {
-				packetSize = mtuSize - 8;
+			    packetSize = Math.min(mtuSize - 8, packetSize);
 			}
+            //log(packet);
 			System.arraycopy(packet, 8, payload, offset, packetSize);
 			offset += packetSize;
 		}
@@ -1253,32 +1395,38 @@ public class Message {
 	}
 
     private static final int[] CRC16_TABLE = {
-        0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
-        0x8008, 0x9029, 0xA04A, 0xB06B, 0xC08C, 0xD0AD, 0xE0CE, 0xF0EF,
-        0x1081, 0x1082, 0x2083, 0x3084, 0x4085, 0x50A6, 0x60C7, 0x70E8,
-        0x8009, 0x902A, 0xA04B, 0xB06C, 0xC08D, 0xD0AE, 0xE0CF, 0xF0EF,
-        0x2102, 0x3213, 0x4324, 0x5435, 0x6546, 0x7657, 0x8768, 0x9879,
-        0xA09A, 0xB0AB, 0xC0AC, 0xD0AD, 0xE0AE, 0xF0AF,
-        0x3121, 0x4232, 0x5343, 0x6454, 0x7565, 0x8676, 0x9787, 0xA098,
-        0xB0A9, 0xC0AA, 0xD0AB, 0xE0AC, 0xF0AD,
-        0x4122, 0x5233, 0x6344, 0x7455, 0x8566, 0x9677, 0xA078, 0xB089,
-        0xC0A9, 0xD0AA, 0xE0AB, 0xF0AC,
-        0x5123, 0x6234, 0x7345, 0x8456, 0x9567, 0xA078, 0xB089, 0xC0A9,
-        0xD0AA, 0xE0AB, 0xF0AC,
-        0x6124, 0x7135, 0x8146, 0x9157, 0xA068, 0xB089, 0xC0A9, 0xD0AA,
-        0xE0AB, 0xF0AC,
-        0x7136, 0x8147, 0x9158, 0xA069, 0xB0A9, 0xC0AA, 0xD0AB,
-        0xE0AC, 0xF0AD,
-        0x8148, 0x9159, 0xA06A, 0xB0AB, 0xC0AC, 0xD0AD, 0xE0AE,
-        0xF0AF,
-        0x915A, 0xA06B, 0xB0AC, 0xC0AD, 0xD0AE, 0xE0AF,
-        0xF0B0,
-        0xA06C, 0xB0AD, 0xC0AE, 0xD0AF, 0xE0B0, 0xF0B1,
-        0xB0AE, 0xC0AF, 0xD0B0, 0xE0B1, 0xF0B2,
-        0xC0B0, 0xD0B1, 0xE0B2, 0xF0B3,
-        0xD0B2, 0xE0B3, 0xF0B4,
-        0xE0B4, 0xF0B5,
-        0xF0B5
+    0x0000, 0x1189, 0x2312, 0x329B, 0x4624, 0x57AD, 0x6536, 0x74BF,
+    0x8C48, 0x9DC1, 0xAF5A, 0xBED3, 0xCA6C, 0xDBE5, 0xE97E, 0xF8F7,
+    0x0919, 0x1890, 0x2A0B, 0x3B82, 0x4F3D, 0x5EB4, 0x6C2F, 0x7DA6,
+    0x8551, 0x94D8, 0xA643, 0xB7CA, 0xC375, 0xD2FC, 0xE067, 0xF1EE,
+    0x1232, 0x03BB, 0x3120, 0x20A9, 0x5416, 0x459F, 0x7704, 0x668D,
+    0x9E7A, 0x8FF3, 0xBD68, 0xACE1, 0xD85E, 0xC9D7, 0xFB4C, 0xEAC5,
+    0x1B2B, 0x0AA2, 0x3839, 0x29B0, 0x5D0F, 0x4C86, 0x7E1D, 0x6F94,
+    0x9763, 0x86EA, 0xB471, 0xA5F8, 0xD147, 0xC0CE, 0xF255, 0xE3DC,
+    0x2464, 0x35ED, 0x0776, 0x16FF, 0x6240, 0x73C9, 0x4152, 0x50DB,
+    0xA82C, 0xB9A5, 0x8B3E, 0x9AB7, 0xEE08, 0xFF81, 0xCD1A, 0xDC93,
+    0x2D7D, 0x3CF4, 0x0E6F, 0x1FE6, 0x6B59, 0x7AD0, 0x484B, 0x59C2,
+    0xA135, 0xB0BC, 0x8227, 0x93AE, 0xE711, 0xF698, 0xC403, 0xD58A,
+    0x3656, 0x27DF, 0x1544, 0x04CD, 0x7072, 0x61FB, 0x5360, 0x42E9,
+    0xBA1E, 0xAB97, 0x990C, 0x8885, 0xFC3A, 0xEDB3, 0xDF28, 0xCEA1,
+    0x3F4F, 0x2EC6, 0x1C5D, 0x0DD4, 0x796B, 0x68E2, 0x5A79, 0x4BF0,
+    0xB307, 0xA28E, 0x9015, 0x819C, 0xF523, 0xE4AA, 0xD631, 0xC7B8,
+    0x48C8, 0x5941, 0x6BDA, 0x7A53, 0x0EEC, 0x1F65, 0x2DFE, 0x3C77,
+    0xC480, 0xD509, 0xE792, 0xF61B, 0x82A4, 0x932D, 0xA1B6, 0xB03F,
+    0x41D1, 0x5058, 0x62C3, 0x734A, 0x07F5, 0x167C, 0x24E7, 0x356E,
+    0xCD99, 0xDC10, 0xEE8B, 0xFF02, 0x8BBD, 0x9A34, 0xA8AF, 0xB926,
+    0x5AFA, 0x4B73, 0x79E8, 0x6861, 0x1CDE, 0x0D57, 0x3FCC, 0x2E45,
+    0xD6B2, 0xC73B, 0xF5A0, 0xE429, 0x9096, 0x811F, 0xB384, 0xA20D,
+    0x53E3, 0x426A, 0x70F1, 0x6178, 0x15C7, 0x044E, 0x36D5, 0x275C,
+    0xDFAB, 0xCE22, 0xFCB9, 0xED30, 0x998F, 0x8806, 0xBA9D, 0xAB14,
+    0x6CAC, 0x7D25, 0x4FBE, 0x5E37, 0x2A88, 0x3B01, 0x099A, 0x1813,
+    0xE0E4, 0xF16D, 0xC3F6, 0xD27F, 0xA6C0, 0xB749, 0x85D2, 0x945B,
+    0x65B5, 0x743C, 0x46A7, 0x572E, 0x2391, 0x3218, 0x0083, 0x110A,
+    0xE9FD, 0xF874, 0xCAEF, 0xDB66, 0xAFD9, 0xBE50, 0x8CCB, 0x9D42,
+    0x7E9E, 0x6F17, 0x5D8C, 0x4C05, 0x38BA, 0x2933, 0x1BA8, 0x0A21,
+    0xF2D6, 0xE35F, 0xD1C4, 0xC04D, 0xB4F2, 0xA57B, 0x97E0, 0x8669,
+    0x7787, 0x660E, 0x5495, 0x451C, 0x31A3, 0x202A, 0x12B1, 0x0338,
+    0xFBCF, 0xEA46, 0xD8DD, 0xC954, 0xBDEB, 0xAC62, 0x9EF9, 0x8F70
     };
 
     public static short crc16(byte[] data) {
@@ -1288,10 +1436,15 @@ public class Message {
             crc = (crc >>> 8) ^ CRC16_TABLE[(crc ^ b) & 0xFF];
         }
 
-        return (short)(~crc & 0xFFFF);
+        //return (short)(~crc & 0xFFFF);
+        return (short) (crc & 0xFFFF);
     }
 
+
+
 }
+
+
 ```
 This design allows the Message class to effectively manage and process different types of messages while ensuring data integrity through checksums and proper fragmentation.
 
@@ -1300,171 +1453,8 @@ This design allows the Message class to effectively manage and process different
 
 The ```MessageTransmitter``` class is responsible for sending messages over a Bluetooth connection. It handles the fragmentation of messages, manages retransmissions in case of packet loss, and ensures reliable delivery of data.
 
-```
-public class MessageTransmitter {
-    // Timeout value for packet retransmission (100ms)
-    private static final int TIMEOUT_VALUE = 100; 
-    // Maximum number of retransmissions (3)
-    private static final int MAX_RETRANSMISSIONS = 3;
+The code is shown in the [above section](#packet-retransmission).
 
-    // Map to store packets with their sequence numbers
-    private Map<Integer, byte[]> messageMap;
-    // Next sequence number to be sent
-    private int nextSequenceNumber;
-    // Current message being transmitted
-    private Message msg;
-    // Fragmented packets of the current message
-    private byte[][] msgPackets;
-
-    // Input and output streams for Bluetooth communication
-    private InputStream mmIn;
-    private OutputStream mmOut;
-
-    // Timer for packet retransmission
-    private Timer timer;
-
-    public MessageTransmitter(InputStream in, OutputStream out) {
-        messageMap = new HashMap<>();
-        nextSequenceNumber = 0;
-        mmIn = in;
-        mmOut = out;
-    }
-
-    /**
-     * Send a message over Bluetooth
-     * @param message the message to be sent
-     */
-    public void sendMessage(Message message) {
-        try {
-            msg = message;
-            // Fragment the message into packets
-            msgPackets = Message.fragmentPacket(message, 32); // 32 is the MTU size
-            for (byte[] packet : msgPackets) {
-                int sequenceNumber = packet[2] & 0x7F;
-                messageMap.put(sequenceNumber, packet);
-            }
-            int seq = msgPackets[0][2] & 0x7F;
-            nextSequenceNumber = seq - 1;
-
-            // Send the first packet
-            sendPacket(seq, msgPackets[0]);
-        }catch(Exception e) {
-            return;
-        }
-    }
-
-    /**
-     * Send a packet over Bluetooth
-     * @param sequenceNumber the sequence number of the packet
-     * @param packet the packet to be sent
-     */
-    private void sendPacket(int sequenceNumber, byte[] packet) {
-        try {
-            // Send the packet over Bluetooth
-            mmOut.write(packet);
-            // Start a timer for packet retransmission
-            startTimer(sequenceNumber, TIMEOUT_VALUE);
-            // Read ACK from receiver
-            readAckPacket(sequenceNumber);
-        }catch(Exception e) {
-            return;
-        }
-    }
-
-    /**
-     * Start a timer for packet retransmission
-     * @param sequenceNumber the sequence number of the packet
-     * @param timeoutValue the timeout value for retransmission
-     */
-    private void startTimer(int sequenceNumber, int timeoutValue) {
-        timer = new Timer();
-        timer.schedule(new TimerTask() {
-            @Override
-            public void run() {
-                handlePacketLoss(sequenceNumber);
-            }
-        }, timeoutValue);
-    }
-
-    /**
-     * Handle packet loss by retransmitting the packet
-     * @param sequenceNumber the sequence number of the packet
-     */
-    private void handlePacketLoss(int sequenceNumber) {
-        byte[] packet = messageMap.get(sequenceNumber);
-        if (packet!= null) {
-            // Retransmit the packet
-            sendPacket(sequenceNumber, packet);
-        } else {
-            // Unknown error
-        }
-    }
-
-    /**
-     * Resend the entire message
-     */
-    private void resendMessage() {
-        int retransmissionCount = msg.getRetransmissionCount();
-        if (retransmissionCount < MAX_RETRANSMISSIONS) {
-            msg.setRetransmissionCount(retransmissionCount + 1);
-            // Resend all packets
-            int seq = msgPackets[0][2] & 0x7F;
-            nextSequenceNumber = seq - 1;
-            sendPacket(seq, msgPackets[0]);
-        } else {
-            // Report error: packet lost after max retransmissions
-            return;
-        }
-    }
-
-    /**
-     * Read an ACK packet from the input stream
-     * @param sequenceNumber the sequence number of the packet
-     */
-    private void readAckPacket(int sequenceNumber) {
-        try {
-            byte[] ackBuffer = new byte[12]; // ACK packet is 12 bytes
-            int bytesRead = mmIn.read(ackBuffer);
-			// 0x06 is ACK message type
-			// Check that the sequence number is the same for sender and receiver, otherwise report error
-            if (bytesRead == 12 && ackBuffer[2] == (byte)sequenceNumber && ackBuffer[5] == (byte)0x06) { 
-                receiveAckPacket(sequenceNumber, 1);
-            } else {
-                receiveAckPacket(sequenceNumber, 0);
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    /**
-     * Receive an ACK packet and handle it accordingly
-     * @param sequenceNumber the sequence number of the packet
-     * @param status the status of the packet (1 = acknowledged, 0 = error)
-     */
-    public void receiveAckPacket(int sequenceNumber, int status) {
-        byte[] packet = messageMap.get(sequenceNumber);
-        if (packet!= null) {
-            if (status == 1) {
-                // Packet acknowledged, send next packet
-                timer.cancel(); // cancel the timer
-                int next = nextSequenceNumber;
-                if (next == 1) {
-                    // All packets are sent
-                    return;
-                }
-                nextSequenceNumber--;
-                sendPacket(next, messageMap.get(next));
-            } else {
-                // Error occurred, resend all packets because we don't know what is going on
-                resendMessage();
-            }
-        }
-    }
-}
-
-
-```
 This class effectively manages the sending of fragmented messages, ensures reliable delivery through retransmission and acknowledgment handling, and maintains the integrity of the communication process.
 
 ### The ```MessageReceiver```
@@ -1475,14 +1465,14 @@ The ```MessageReceiver``` class is designed to handle the reception of fragmente
 public class MessageReceiver {
     private InputStream mmIn;
     private OutputStream mmOut;
-    private Map<Integer, byte[]> receivedPackets;
+    private List<byte[]> receivedPackets;
     private int expectedSequenceNumber;
     private short expectedPacketNumber;
 
     public MessageReceiver(InputStream in, OutputStream out) {
         this.mmIn = in;
         this.mmOut = out;
-        this.receivedPackets = new HashMap<>();
+        this.receivedPackets = new ArrayList<>();
         this.expectedSequenceNumber = 0x81;
         this.expectedPacketNumber = -1;
     }
@@ -1490,44 +1480,46 @@ public class MessageReceiver {
     public Message receiveMessage() throws IOException {
 		short pn = 0;
         while (true) {
-            byte[] responseBuffer = new byte[32]; // MTU size is 32 bytes
-            int bytesRead = mmIn.read(responseBuffer);
+            byte[] packet = new byte[32]; // MTU size is 32 bytes
+            int bytesRead = mmIn.read(packet);
 
             if (bytesRead > 0) {
-                byte[] packet = Arrays.copyOfRange(responseBuffer, 0, bytesRead);
-
                 short packetNumber = (short) ((packet[0] << 8) | (packet[1] & 0xFF));
                 byte sequenceNumber = packet[2];
                 short checksum = (short) ((packet[3] << 8) | (packet[4] & 0xFF));
                 byte msgType = packet[5];
                 short msgSize = (short) ((packet[6] << 8) | (packet[7] & 0xFF));
-                byte[] payload = Arrays.copyOfRange(packet, 8, bytesRead);
+                int len = Math.min(msgSize, 24);
+                byte[] payload = Arrays.copyOfRange(packet, 8, len + 8);
 
                 // Check sequence number and checksum
-				if ((sequenceNumber & 0x80) == 1) {  // First packet
+				if ((sequenceNumber & 0x80) == 0x80) {  // First packet
 					expectedSequenceNumber = sequenceNumber & 0x7F;
-                    receivedPackets.put((int) sequenceNumber, packet);
-					pn = packetNumber;
-
+                    receivedPackets.clear();
+                    receivedPackets.add(packet);
+					expectedPacketNumber = packetNumber;
 					// Send ACK for successful packet
                     sendAck(packetNumber, sequenceNumber, true);
 					// If this is the last packet (sequenceNumber = 1)
 					if (expectedSequenceNumber == 1) {
-						return Message.assemblePacket(receivedPackets.values().toArray(new byte[0][]), 32);
+						return Message.assemblePacket(receivedPackets.toArray(new byte[0][]), 32);
 					}
                     expectedSequenceNumber--;
-				} else if (sequenceNumber == expectedSequenceNumber && packetNumber == pn && checksum == Message.crc16(payload)) { // Subsequent packet
-                    receivedPackets.put((int) sequenceNumber, packet);
+				} else if (sequenceNumber == expectedSequenceNumber && packetNumber == expectedPacketNumber && checksum == Message.crc16(payload)) { // Subsequent packet
+                    receivedPackets.add(packet);
 
                     // Send ACK for successful packet
                     sendAck(packetNumber, sequenceNumber, true);
 
                     // If this is the last packet (sequenceNumber = 1)
                     if (expectedSequenceNumber == 1) {
-                        return Message.assemblePacket(receivedPackets.values().toArray(new byte[0][]), 32);
+                        return Message.assemblePacket(receivedPackets.toArray(new byte[0][]), 32);
                     }
                     expectedSequenceNumber--;
                 } else {
+                    System.out.println("receiver: error packet");
+                    Message.log(packet);
+                    // Send ACK for successful packet
                     // Send ACK for erroneous packet
                     sendAck(packetNumber, sequenceNumber, false);
 					// The sender should retransmit and it will update the HashMap
@@ -1538,9 +1530,13 @@ public class MessageReceiver {
 
     private void sendAck(short packetNumber, byte sequenceNumber, boolean status) throws IOException {
         Message ackMessage = Message.createAckMessage(packetNumber, sequenceNumber, status);
-        mmOut.write(ackMessage.payload);
+        byte[][] msgPackets = Message.fragmentPacket(ackMessage, 32); // 32 is the MTU size
+        //Message.log(msgPackets[0]);
+        mmOut.write(msgPackets[0]);
     }
 }
+
+
 ```
 The class processes incoming packets by reading them from the input stream, validating their sequence numbers and checksums, and reassembling them into complete messages. It maintains a map of received packets and tracks the expected sequence number to handle packet order. For each packet, it sends an acknowledgment (ACK) back to the sender to confirm successful receipt or indicate errors, thus facilitating reliable communication.
 
@@ -1588,7 +1584,7 @@ public class MessageController {
     }
 
     private void sendAuthRequest(Runnable onResponseReceived) {
-        byte[] authPayload = {}; // Empty auth message payload
+        byte[] authPayload = "dummy_auth_request".getBytes(); // Empty auth message payload
         Message authMessage = Message.createAuthMessage(authPayload);
         transmitter.sendMessage(authMessage);
         onResponseReceived.run();
@@ -1683,9 +1679,180 @@ public class MessageController {
 The controller handles the authentication process by sending authentication requests and processing responses. It uses the sendAuthRequest, sendSyncTimestampRequest, and sendChallengeResponse methods to manage various stages of authentication. Once authenticated, it proceeds to execute commands like sendDoorCommand and sendChangePasswordRequest. The handleResponse method processes responses from the receiver, ensuring that the operations are completed correctly and updating the internal state as needed.
 
 
+### Simulating Bluetooth Communication for Automated Testing
+
+As described in [previous section](#android-development-challenge-no-bluetooth-emulation), 
+due to the lack of support for Bluetooth peripherals in Android emulators, 
+it limits the development and testing process, especially when trying to achieve comprehensive automated testing.
+
+To overcome this challenge, I developed a TCP socket-based simulation environment. This approach allows us to test our Bluetooth communication code without the need for a physical Bluetooth device. Here’s how you can implement this simulation and an accompanying automated test suite to facilitate regression testing.
+
+#### The App Side: Client
+
+Here is a brief overview of the code:
+
+```
+public class BluetoothCommunicationTest {
+
+    public static void main(String[] args) {
+        try {
+            Socket socket = new Socket("localhost", 8080);
+            OutputStream out = socket.getOutputStream();
+            InputStream in = socket.getInputStream();
+
+            MessageController controller = new MessageController(in, out, "default_password".getBytes());
+
+            // Test sending door command
+            System.out.println("controller send door command");
+            controller.sendDoorCommand("OPEN".getBytes());
+
+            // Test changing password
+            System.out.println("controller send change password command");
+            controller.sendChangePasswordRequest("new_password".getBytes());
+
+            // TODO: Add more tests in the following
+
+            socket.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
 
 
-###  Next Steps
+```
+The BluetoothCommunicationTest class demonstrates an Android app simulation using TCP sockets to test Bluetooth communication. It connects to a local server on port 8080, initializes a MessageController with input and output streams, and performs tests by sending a door command ("OPEN") and a change password request ("new_password"). This setup allows automated testing of the Bluetooth communication protocol without needing physical Bluetooth hardware.
+
+
+
+#### The Door Controller Side: Server
+
+Here’s a brief overview of the code:
+
+```
+public class DeviceTest {
+    private static final int PORT = 8080;
+
+    public static void main(String[] args) {
+        try {
+            ServerSocket serverSocket = new ServerSocket(PORT, 50, InetAddress.getByName("127.0.0.1"));
+            System.out.println("Server is listening on port " + PORT);
+
+            // Accept a client connection
+            try {
+                Socket socket = serverSocket.accept();
+                InputStream in = socket.getInputStream();
+                OutputStream out = socket.getOutputStream();
+
+                System.out.println("Client connected");
+
+                // Handle incoming messages
+                handleMessages(in, out);
+
+            } catch (IOException e) {
+                System.err.println("Client connection error: " + e.getMessage());
+            }
+
+        } catch (IOException e) {
+            System.err.println("Server error: " + e.getMessage());
+        }
+    }
+
+    public static void handleMessages(InputStream in, OutputStream out) throws IOException {
+        System.out.println("handleMessages");
+        MessageReceiver receiver = new MessageReceiver(in, out);
+
+        // Authenticate
+        Message authmsg = receiver.receiveMessage();
+        System.out.println(new String(authmsg.payload, "UTF-8"));
+        System.out.println("auth request OK");
+        System.out.println("auth begin");
+
+        MessageTransmitter sender = new MessageTransmitter(in, out);
+        Message rspmsg = Message.createChallengeResponseMessage("dummy_challenge".getBytes(), "".getBytes());
+        sender.sendMessage(rspmsg);
+
+        System.out.println("auth check");
+        Message authrsp = receiver.receiveMessage();
+        System.out.println(new String(authrsp.payload, "UTF-8"));
+        System.out.println("auth end");
+
+        // Handle commands
+        System.out.println("cmd begin");
+        Message msg = receiver.receiveMessage();
+        System.out.println(new String(msg.payload, "UTF-8"));
+
+        // TODO: Add more message tests in the following
+
+        System.out.println("bye");
+    }
+}
+
+```
+The DeviceTest class sets up a server that listens on port 8080 and handles simulated Bluetooth communication using TCP sockets. It accepts client connections, authenticates them, and processes incoming commands, printing received messages. This setup allows for testing the Bluetooth communication protocol without needing physical Bluetooth hardware, supporting automated testing.
+
+
+
+#### Findings and Optimization from Extensive Simulated Bluetooth Testing
+
+Through extensive testing in a simulated Bluetooth environment, we discovered several key insights related to timeout settings and their impact on communication performance:
+
+Timeout at 100ms:
+
+Setting the timeout to 100ms resulted in a high rate of timeout retransmissions, especially when the number of Bluetooth packets was large.
+This retransmission rate was significantly higher compared to physical Bluetooth packet loss, indicating that the 100ms timeout is too aggressive for reliable communication.
+
+Timeout at 500ms:
+
+When the timeout was increased to 500ms, retransmissions only occurred due to actual Bluetooth packet loss, which is more aligned with real-world scenarios.
+However, the overall communication speed was lower than the 100ms timeout setting, highlighting a trade-off between reliability and speed.
+
+Optimal Timeout at 250ms:
+
+Setting the timeout to 250ms struck a balance between high transmission efficiency and acceptable retransmission rates.
+This setting provided the best performance in our simulated environment, combining reliable communication with a good data transfer rate.
+
+While the results in our physical Bluetooth hardware environment showed slight variations, the differences were not substantial. Therefore, we recommend further testing with the actual door controller Bluetooth hardware during deployment to determine the optimal timeout setting. This approach ensures the best performance tailored to specific hardware conditions.
+
+
+
+## Android App: A Refined Version
+
+In previous chapters, we implemented a basic version of our Android app with a very rough and unrefined UI.
+
+To address these new functionalities we mentioned in this tutorial , we redesigned the app's UI. Below are the specific improvements made:
+
+* Enhanced Device List:
+
+The device list now includes icons and signal strength indicators, providing more information at a glance.
+
+* Connection Status:
+
+Added a dedicated connection status indicator that visually shows whether the app is connected to a Bluetooth device, making it easier for users to understand the app's state.
+
+* Authentication Screen:
+
+Introduced a new screen for authentication, where users can input their credentials. This screen guides users through the authentication process with clear instructions and feedback.
+
+* Control Panel:
+
+Added a control panel for sending door commands. This panel includes buttons for common commands like "Open" and "Close" and provides immediate visual feedback on the command status.
+
+* Feedback and Logs:
+
+Improved the feedback and log section, making it more readable and interactive. Users can now filter logs and view detailed information about each log entry.
+
+* Overall Aesthetics:
+
+Upgraded the app's overall look and feel with a more modern design, including consistent colors, fonts, and layouts. These changes make the app not only more functional but also more visually appealing.
+The new UI design enhances the user experience significantly, making the app more intuitive and easier to navigate. Below is a screenshot of the improved UI:
+
+![app](/static/018.png)
+
+By incorporating these improvements, we aim to provide a seamless and efficient user experience, ensuring that all the new functionalities are easily accessible and user-friendly.
+
+
+##  Next Steps
 
 Despite the complexity, I'm proud of what we've accomplished. We've created a system that's not only functional but also secure and user-friendly. And with the sequence diagram, we can see exactly how all the different components fit together to create a seamless user experience.
 
@@ -1695,7 +1862,7 @@ You could download the whole project source code and test if yourself. Keep in m
 And then, of course, there's the possibility of adding even more features to the system. Maybe we could add support for multiple doors or integrate with other smart home devices. The possibilities are endless, and I'm excited to see where this project will take us in the future.
 
 
-## Frequently Asked Questions
+## Questions And Limitations
 
 ### Relay Connection Conundrum: NO or NC?
 
@@ -1708,3 +1875,15 @@ initially, and then we would apply voltage to it.
 Interestingly, the app now briefly disconnects the switch and then reconnects it to the NC side.
 This is the opposite of what I initially expected, but fortunately, the app and all switches now
 work seamlessly together.
+
+The current version of the app lacks robust error handling, which may result in crashes when an error occurs. In such cases, restarting the app usually resolves the issue. Future updates will include more comprehensive error handling to minimize unexpected behavior and improve overall stability.
+
+### The MTU Size
+
+For this tutorial, the MTU (Maximum Transmission Unit) is set to a fixed value of 32. Extensive testing has shown that this value offers the best compatibility across different Bluetooth hardware. However, MTU sizes can vary between devices, as they are often determined by the hardware manufacturers. While setting the MTU to a smaller value enhances compatibility, it can also result in slower data transmission rates. This trade-off ensures the app works with as many devices as possible.
+
+### More General DIY Hardware
+
+Although the hardware used in this tutorial is based on an existing courtyard gate system, both the hardware and software solutions are designed to be versatile. For those interested in creating their own DIY hardware, you can use components such as an Arduino, Bluetooth Module HC-05, an MCU chip, and a 3D printed door lock. By assembling these parts, you can create a cost-effective DIY smart door lock system.
+
+
