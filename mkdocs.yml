@@ -25,7 +25,6 @@ theme:
     - search.highlight
     - search.suggest
 plugins:
-  - blog
   - search:
       separator: '[\s\u200b\-_,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
   - git-revision-date-localized:
@@ -38,15 +37,34 @@ extra:
 # Page tree
 nav:
   - Home: index.md
+  - EaseCar:
+    - About: easecar/index.md
+    - EaseCar Tutorial: easecar/tutorial.md
+    - EaseCar Download: easecar/download.md
+  - EaseHome:
+    - About: easehome/index.md
+    - EaseHome Tutorial: easehome/tutorial.md
+    - EaseHome Download: easehome/download.md
   - EaseLock:
     - Home: easelock/index.md
     - EaseLock Hardware Tutorial: easelock/hw.md
     - EaseLock Software Tutorial: easelock/app.md
-    - Frequently Asked Questions: easelock/fqa.md
-  - EaseHome:
-    - About: easehome/index.md
-  - Download:
-    - 00io: download/index.md
-  - Blog:
-    - blog/index.md
+    - EaseLock Download: easelock/download.md
+  - EaseRobot:
+    - EaseRobot Home: easerobot/index.md
+    - Tutorial Part1: easerobot/p1.md
+    - Tutorial Part2: easerobot/p2.md
+    - Tutorial Part3: easerobot/p3.md
+    - Tutorial Part4: easerobot/p4.md
+    - Tutorial Part5: easerobot/p5.md
+    - Tutorial Part6: easerobot/p6.md
+    - Tutorial Part7: easerobot/p7.md
+    - Tutorial Part8: easerobot/p8.md
+    - EaseRobot Download: easerobot/download.md
+  - EaseWatcher:
+    - Home: easewatcher/index.md
+    - EaseWatcher Tutorial: easewatcher/tutorial.md
+    - EaseWatcher Download: easewatcher/download.md
+  - Community:
+    - community/index.md
 
